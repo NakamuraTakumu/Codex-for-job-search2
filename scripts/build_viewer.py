@@ -9,6 +9,7 @@ import json
 import os
 import re
 import calendar
+import copy
 import subprocess
 import sys
 from datetime import date, datetime, timezone, timedelta
@@ -542,7 +543,7 @@ def profile_details(profile) -> dict:
         if d:
             out[COL_INDEX[label]] = d
             if field == INDUSTRY_FIELD:
-                out.update({COL_INDEX[c]: d for c in INDUSTRY_POS})
+                out.update({COL_INDEX[c]: copy.deepcopy(d) for c in INDUSTRY_POS})  # 別列と同じ object を持たせない（build_html が各セル詳細を1度ずつ添字化するため）
     return out
 
 
@@ -621,7 +622,7 @@ def build_rows(profiles: dict[str, dict], cases: list[dict]):
             best_cell, best = max_salary_cell([c[0] for c in per_degree])
             tail.append(best_cell)
             if best is not None:
-                ds[COL_INDEX["初任給"]] = ds[COL_INDEX[DEGREES[best] + "初任給"]]
+                ds[COL_INDEX["初任給"]] = copy.deepcopy(ds[COL_INDEX[DEGREES[best] + "初任給"]])  # 同じ object を共有しない（build_html が各セル詳細を1度ずつ添字化するため）
             tail += [c for cells in per_degree for c in cells]
             # 枠のリモート勤務は多くが企業全体の制度からの流用で「リモ制」と重なるため、列にせず応募枠のポップアップに出す。
             ds["remote"] = metric_detail(slots, lambda s: s.get("has_remote_work"), fmt_bool, year)
@@ -807,7 +808,11 @@ def unify_decimals(rows, groups, companies) -> None:
 
 def build_html(rows: list[list], groups: list[dict], companies: dict[str, dict], skipped: int = 0,
                password: str | None = None) -> str:
-    """password が None または空なら平文、非空なら暗号化した閲覧ページを返す。環境変数は読まない。"""
+    """password が None または空なら平文、非空なら暗号化した閲覧ページを返す。環境変数は読まない。
+
+    引数は変更しない（以下の桁揃え・添字化は複製に対して行う）。main は同じ入力で平文版と暗号化版を続けて作る。
+    """
+    rows, groups, companies = copy.deepcopy((rows, groups, companies))
     unify_decimals(rows, groups, companies)
     jst = timezone(timedelta(hours=9))
     urls: dict[str, int] = {}

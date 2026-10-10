@@ -96,6 +96,40 @@ class BuildRowsTest(unittest.TestCase):
         g = groups[rows[0][-1]["g"]]
         self.assertEqual(g[str(COL["初任給"])], g[str(COL["修士初任給"])])
 
+    def test_cell_details_are_not_shared_between_columns(self):
+        # build_html は URL・note を詳細の中で添字に置き換える。列間で同じ object を共有すると二重に置き換わり、
+        # ポップアップに添字そのもの（数字）が出る。
+        sl = slot(2028, ["A"], [(240000, "official")])
+        sl["starting_salary"]["note"] = "月給の注記"
+        sl["starting_salary_master"] = {"records": [rec({"monthly_total_yen": 300000}, "unofficial")], "note": "修士の注記"}
+        rows, groups, companies = self.built([sl])
+        for k in ("初任給", "修士初任給"):
+            self.assertIsNot(groups[rows[0][-1]["g"]][str(COL[k])], groups[rows[0][-1]["g"]][str(COL["学士初任給"])])
+        p = profile("P", "採用元社")
+        p["basic_information"]["industry_classification_codes"] = {"records": [rec(["E_manufacturing"])]}
+        p["basic_information"]["industry_classification_codes"]["note"] = "業種の注記"
+        d = bv.profile_details(p)
+        self.assertIsNot(d[COL["業種1位"]], d[COL["業種"]])
+        html = bv.build_html(rows, groups, {"P": {str(k): v for k, v in d.items()}})
+        data = json.loads(re.search(r'<script[^>]*id="data"[^>]*>(.*?)</script>', html, re.S)[1])
+        self.assertTrue(all(isinstance(x, str) for x in data["notes"] + data["urls"]))
+        for store in [*data["groups"], *data["companies"].values()]:
+            for cd in store.values():
+                for n in cd[1]:
+                    self.assertIn("注記", data["notes"][n[1]])
+
+    def test_build_html_does_not_mutate_inputs(self):
+        # main は同じ入力で平文版と暗号化版を続けて作る。入力を書き換えると2回目（暗号化版）だけ添字が二重化する。
+        sl = slot(2028, ["A"], [(240000, "official")])
+        sl["starting_salary"]["note"] = "月給の注記"
+        rows, groups, companies = self.built([sl])
+        before = json.dumps([rows, groups, companies], ensure_ascii=False, sort_keys=True)
+        first = bv.build_html(rows, groups, companies)
+        self.assertEqual(json.dumps([rows, groups, companies], ensure_ascii=False, sort_keys=True), before)
+        second = bv.build_html(rows, groups, companies)
+        strip = lambda h: re.sub(r'"built_at":"[^"]*"', "", h)
+        self.assertEqual(strip(first), strip(second))
+
     def test_good_direction_columns(self):
         self.assertLessEqual(set(bv.GOOD_DIRECTION), set(bv.COLUMNS))
         for c in ("初任給", "学士基本給", "博士その他", "平均年収", "リモート制度", "えるぼし", "研究開発費"):
@@ -637,7 +671,7 @@ class EncryptionTest(unittest.TestCase):
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        rows, _, _, html = self.built()
+        rows, groups, companies, html = self.built()
         e = self.payload(html)
         self.assertEqual((e["alg"], e["hash"], e["iterations"]), ("AES-256-GCM", "SHA-256", 200_000))
         salt, iv, ct = (base64.b64decode(e[k]) for k in ("salt", "iv", "ct"))
@@ -645,7 +679,10 @@ class EncryptionTest(unittest.TestCase):
         key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=e["iterations"]).derive(
             self.PASSWORD.encode())
         data = json.loads(AESGCM(key).decrypt(iv, ct, None).decode("utf-8"))
-        self.assertEqual(data["rows"], rows)
+        # 暗号化版の中身は平文版と同一（built_at を除く）。平文版を先に作っても暗号化版が崩れないこと。
+        plain = self.payload(bv.build_html(rows, groups, companies))
+        self.assertEqual({k: v for k, v in data.items() if k != "built_at"},
+                         {k: v for k, v in plain.items() if k != "built_at"})
         self.assertEqual(data["columns"], bv.COLUMNS)
 
     def test_wrong_passphrase_fails(self):
@@ -668,7 +705,7 @@ class EncryptionTest(unittest.TestCase):
         html = bv.build_html(rows, groups, companies)
         for text in ("採用元社", "秘密の応募枠"):
             self.assertIn(text, html)
-        self.assertEqual(self.payload(html)["rows"], rows)
+        self.assertEqual(len(self.payload(html)["rows"]), len(rows))
         for marker in ('id="lock"', "crypto.subtle", "sessionStorage", "decrypt", "__"):
             self.assertNotIn(marker, html)
         self.assertNotIn(" hidden>", html.split('id="app"')[1][:20])

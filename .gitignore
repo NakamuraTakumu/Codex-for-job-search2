@@ -1,0 +1,12 @@
+.codex-job-runner-logs/
+tmp/
+data/
+
+__pycache__/
+*.py[cod]
+
+.pytest_cache/
+.venv/
+.env*
+_site/
+site/

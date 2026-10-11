@@ -10,3 +10,7 @@ __pycache__/
 .env*
 _site/
 site/
+
+document/
+/AGENTS.md
+.vscode/

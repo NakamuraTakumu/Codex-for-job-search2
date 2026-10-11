@@ -53,6 +53,7 @@ def build_session_config(
         context=context,
         model=model,
         reasoning_effort=reasoning_effort,
+        web_search="live",
         codex_bin=codex_bin,
         timeout=timeout,
         ignore_global_context=True,
@@ -96,6 +97,8 @@ class CollectedJsonCodexJob(CodexJob):
         collected_output_path,
         domain_schema_path,
         review_shared_context=(),
+        review_read_paths=(),
+        review_extra_context=(),
         read_paths=None,
         write_paths=None,
         review=None,
@@ -139,7 +142,7 @@ class CollectedJsonCodexJob(CodexJob):
             allow_shell_commands=True,
             tools=None,
             workspace=workspace.with_overrides(
-                read_paths=("${SUBCWD}/.",),
+                read_paths=("${SUBCWD}/.", *map(str, review_read_paths)),
                 write_paths=(),
             ),
         )
@@ -150,7 +153,7 @@ class CollectedJsonCodexJob(CodexJob):
                     collected_output_path,
                     domain_schema_path,
                     shared_context=review_shared_context,
-                ),
+                ) + tuple(review_extra_context),
                 artifact_paths=(canonical_artifact_path,),
                 session=review_session,
                 reuse_session=True,
@@ -164,6 +167,22 @@ class CollectedJsonCodexJob(CodexJob):
                 review,
                 artifact_paths=(*review.artifact_paths, canonical_artifact_path),
             )
+        if review_read_paths or review_extra_context:
+            # Respect a caller-supplied reviewer, adding the same host evidence
+            # access/contract that the default reviewer receives.
+            session = review.session or review_session
+            session = session.with_overrides(workspace=session.workspace.with_overrides(
+                read_paths=tuple(dict.fromkeys((*session.workspace.read_paths, *map(str, review_read_paths)))),
+            ))
+            children = review.subagents
+            if children is not None and children.session is not None:
+                children = replace(children, session=children.session.with_overrides(
+                    workspace=children.session.workspace.with_overrides(
+                        read_paths=tuple(dict.fromkeys((*children.session.workspace.read_paths, *map(str, review_read_paths)))),
+                    ),
+                ))
+            review = replace(review, session=session, subagents=children,
+                             context=tuple(dict.fromkeys((*review.context, *review_extra_context))))
         super().__init__(
             config=job_config,
             input=prompt,

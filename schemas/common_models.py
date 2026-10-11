@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from typing import Generic, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -52,6 +52,21 @@ class Source(SchemaModel):
         if not value or parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("source url must be a non-empty HTTP or HTTPS URL")
         return value
+
+
+def source_url_identity(url: str) -> str:
+    """Evidence identity only; never rewrite a stored Source.url.
+
+    Fragments, hostname case and default ports cannot create a second retrieval
+    path for the same HTTP resource. Paths/query strings remain untouched.
+    """
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii").lower()
+    authority = f"[{host}]" if ":" in host else host
+    port = parsed.port
+    if port is not None and port != (443 if parsed.scheme == "https" else 80):
+        authority += f":{port}"
+    return urlunsplit((parsed.scheme.lower(), authority, parsed.path or "/", parsed.query, ""))
 
 
 NOTE_DESCRIPTION = (

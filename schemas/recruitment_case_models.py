@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from enum import StrEnum
+from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .common_models import (
     NOTE_DESCRIPTION,
     CompanyId,
+    MetricRecord,
     SchemaModel,
     Source,
     SourcedMetric,
     require_note_when_empty,
+    source_url_identity,
 )
 
 
@@ -60,7 +63,7 @@ class SelectionProcessStage(SchemaModel):
         min_length=1,
         description=(
             "source が一つの番号や矢印などの区切りにまとめて記載した、応募者が必ず行う工程。"
-            "source の記載順に並べる。"
+            "source がその区切りへの所属を示す必須の書類提出・登録なども含め、source の記載順に並べる。"
         ),
         json_schema_extra={
             "x-do_not": (
@@ -91,10 +94,16 @@ class SelectionProcess(SchemaModel):
     process: SourcedMetric[SelectionProcessValue] = Field(
         description=(
             "応募者が行う選考工程の順序。source が工程の順序を示さない場合は Missing にする。"
-            "面接回数の幅など、stage で表せない事情は note に書く。"
+            "source が所属 stage や順序を示さない必須活動（書類提出、履修履歴登録、適性検査など）は"
+            "stage に入れず、活動名を process の note に書く。Missing の場合も同じ note に書く。"
+            "面接回数の幅など、stage で表せない事情も note に書く。"
         ),
         json_schema_extra={
-            "x-do_not": "別募集枠専用の選考工程 source を流用しない。"
+            "x-do_not": (
+                "別募集枠専用の選考工程 source を流用しない。"
+                "順序や所属 stage が不明な活動を、便宜的な stage、末尾の stage、"
+                "単独の process record にしない。"
+            )
         },
     )
     has_web_test: SourcedMetric[bool] = Field(
@@ -217,6 +226,75 @@ class DateRange(SchemaModel):
         return self
 
 
+class HostFetchRetrieval(SchemaModel):
+    method: Literal["host_fetch"] = Field(description="ホストのfetch_pageが示す生本文snapshot（ライブ取得、または失敗時の手動snapshot）を直接根拠とする。旧形式は保存済み抽出本文を参照する。")
+    origin: Literal["host", "manual"] = Field(default="host", description="fetch_pageのoriginを保持する。hostはホストHTTP取得、manualは利用者が保存してホストへ取り込んだ本文。", json_schema_extra={"x-do_not": "ログと異なるoriginを付けない。手動本文の取り込み時刻をライブHTTP取得時刻と称しない。"})
+    fetched_at: datetime = Field(description="fetch_pageが返した取得時刻。UTCのISO8601形式をそのまま保持する。")
+    snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$", description="fetch_pageが返した生本文バイトのSHA256識別子。旧形式は保存済み抽出本文のSHA256識別子を保持する。")
+
+    @field_validator("fetched_at")
+    @classmethod
+    def validate_utc(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("fetched_at must be timezone-aware UTC")
+        return value
+
+
+class WebToolRetrieval(SchemaModel):
+    method: Literal["web_tool"] = Field(description="ホスト取得が失敗したURLについて、検索ツールのキャッシュ本文を根拠とする。既存記録の移行もこの方法とする。")
+    crawled_label: str | None = Field(description="web.runが示したCrawledラベル（例: 3 weeks ago）。確認できなければnull。")
+    observed_on: date | None = Field(description="検索本文を確認した日（YYYY-MM-DD）。確認できなければnull。")
+
+
+DateRetrieval = Annotated[HostFetchRetrieval | WebToolRetrieval, Field(discriminator="method")]
+
+
+class DateMetricRecord(MetricRecord[DateRange]):
+    retrieval: DateRetrieval = Field(
+        description="応募日程の直接根拠本文の取得経路。ホスト取得なら時刻とsnapshot、検索キャッシュならCrawledラベルと確認日を保持する。",
+        json_schema_extra={"x-do_not": (
+            "fetch_pageで得ていない本文をhost_fetchと称しない。"
+            "同じ調査でfetch_pageが取得成功したURLの値をweb_toolとして記録しない。"
+            "同じURLについてhost_fetchとweb_toolを併存させない。"
+        )},
+    )
+
+
+class AnnouncedLater(SchemaModel):
+    source: Source = Field(description="この募集回の日付が未定・後日案内であることの直接根拠。")
+    retrieval: DateRetrieval = Field(
+        description=DateMetricRecord.model_fields["retrieval"].description,
+        json_schema_extra=DateMetricRecord.model_fields["retrieval"].json_schema_extra,
+    )
+
+
+class SourcedDateMetric(SourcedMetric[DateRange]):
+    records: list[DateMetricRecord] = Field(
+        description=SourcedMetric[DateRange].model_fields["records"].description,
+        json_schema_extra=SourcedMetric[DateRange].model_fields["records"].json_schema_extra,
+    )
+    announced_later: AnnouncedLater | None = Field(
+        default=None,
+        description=(
+            "応募開始日・締切日専用。sourceがこの募集回の当該日付を未定・後日案内"
+            "（決まり次第お知らせ、Coming soon等）と明示する場合に記録する。"
+            "recordsは空配列とし、noteに事情を記録する。日付の記録がある場合はnull。"
+        ),
+        json_schema_extra={"x-do_not": (
+            "日付の記載が見つからないだけで後日案内と推測しない。"
+            "随時・定員に達し次第など、日付を定めない受付条件を後日案内にしない。"
+            "別の年度・応募枠・募集回についての案内を流用しない。"
+            "recordsが空でない場合に設定しない。"
+        )},
+    )
+
+    @model_validator(mode="after")
+    def validate_announced_later(self) -> SourcedDateMetric:
+        if self.records and self.announced_later is not None:
+            raise ValueError("announced_later must be null when records is non-empty")
+        return self
+
+
 class ApplicationWindow(SchemaModel):
     window_name: str | None = Field(
         description=(
@@ -228,14 +306,14 @@ class ApplicationWindow(SchemaModel):
     source: Source = Field(
         description="この募集回が同じ応募枠に属することと、window_nameの直接根拠。"
     )
-    application_open_date: SourcedMetric[DateRange] = Field(
+    application_open_date: SourcedDateMetric = Field(
         description=(
             f"この募集回の応募開始日。{_WINDOW_DATE_RANGE_RULES}"
             "随時、定員に達し次第など、開始日を定めない表記は Missing にする。"
         ),
         json_schema_extra={"x-do_not": _WINDOW_DATE_DO_NOT},
     )
-    application_deadline_date: SourcedMetric[DateRange] = Field(
+    application_deadline_date: SourcedDateMetric = Field(
         description=(
             f"この募集回の応募締切日。{_WINDOW_DATE_RANGE_RULES}"
             "随時、定員に達し次第など、締切日を定めないことをsourceが示す場合は"
@@ -270,8 +348,12 @@ class ApplicationWindow(SchemaModel):
 class ApplicationWindows(SchemaModel):
     records: list[ApplicationWindow] = Field(
         description=(
-            "同じ応募枠内で確認できた募集期間の一覧。source上の募集回の順に並べる。"
-            "募集期間を確認できない（Missing）場合は空配列にする。"
+            "同じ応募枠内で確認できた募集回の一覧。source上の募集回の順に並べる。"
+            "開始日と締切日の一方だけを確認できる場合も、その募集回を記録し、"
+            "確認できない側だけを Missing にする。"
+            "片方または両方の日付が後日案内と明示された募集回も記録し、"
+            "該当する日付のannounced_laterにsourceとretrievalを保持する。"
+            "募集回自体を確認できない（Missing）場合は空配列にする。"
         ),
     )
     note: str | None = Field(default=None, description=NOTE_DESCRIPTION)
@@ -389,8 +471,8 @@ class ApplicationSlot(SchemaModel):
     )
     application_windows: ApplicationWindows = Field(
         description=(
-            "同じ応募枠に早期選考、通常選考、複数回締切がある場合も、開始日と締切日の"
-            "対応を募集回ごとに保持するscope。"
+            "同じ応募枠に早期選考、通常選考、複数回締切がある場合も、"
+            "日程を募集回ごとに保持するscope。"
         ),
         json_schema_extra={
             "x-do_not": "日程だけが異なる募集回を別のApplicationSlotとして重複作成しない。"
@@ -525,6 +607,22 @@ class RecruitmentCase(SchemaModel):
             )
         },
     )
+
+    @model_validator(mode="after")
+    def validate_date_retrieval_consistency(self) -> RecruitmentCase:
+        methods_by_url: dict[str, set[str]] = {}
+        for slot in self.application_slots:
+            for window in slot.application_windows.records:
+                for metric in (window.application_open_date, window.application_deadline_date):
+                    evidence = [*metric.records]
+                    if metric.announced_later is not None:
+                        evidence.append(metric.announced_later)
+                    for record in evidence:
+                        methods_by_url.setdefault(source_url_identity(record.source.url), set()).add(record.retrieval.method)
+        mixed = sorted(url for url, methods in methods_by_url.items() if len(methods) > 1)
+        if mixed:
+            raise ValueError("host_fetch and web_tool must not coexist for the same URL: " + ", ".join(mixed))
+        return self
 
     @model_validator(mode="after")
     def validate_application_slot_inventory(self) -> RecruitmentCase:

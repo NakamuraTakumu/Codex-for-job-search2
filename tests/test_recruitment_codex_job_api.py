@@ -43,8 +43,27 @@ class RecruitmentCodexJobApiTests(unittest.TestCase):
         self.assertEqual(default_config.model, "gpt-6-luna")
         self.assertEqual(default_config.reasoning_effort, "high")
         self.assertEqual(default_config.timeout, 1800)
+        self.assertEqual(default_config.web_search, "live")
+        self.assertEqual(override_config.web_search, "live")
         self.assertEqual(override_config.model, "gpt-6-luna")
         self.assertEqual(override_config.reasoning_effort, "medium")
+
+    def test_reviewer_experiment_sessions_and_subagents_use_live_search(self):
+        from scripts.run_reviewer_model_effort_experiment import (
+            _main_config,
+            _research_subagents,
+            _review_config,
+        )
+
+        main = _main_config(Path.cwd())
+        review = _review_config(Path.cwd(), "gpt-5.6-terra", "high")
+        for config in (
+            main,
+            review.session,
+            _research_subagents(main).session,
+            review.subagents.session,
+        ):
+            self.assertEqual(config.web_search, "live")
 
     def test_reviewer_information_has_one_owner_per_section(self):
         context = build_review_instructions(
@@ -213,7 +232,7 @@ class RecruitmentCodexJobApiTests(unittest.TestCase):
         review = job._definition["review"]
         self.assertIsInstance(review, ReviewConfig)
         review_context = review.context
-        self.assertEqual(len(review_context), 5)
+        self.assertEqual(len(review_context), 6)
         self.assertEqual(
             review_context[1].removeprefix(
                 "Shared contract (jobs/common/research_prompt.md):\n"
@@ -247,7 +266,11 @@ class RecruitmentCodexJobApiTests(unittest.TestCase):
         self.assertEqual(review.session.reasoning_effort, "high")
         self._assert_research_subagents(review.subagents, review.session)
         self.assertTrue(review.session.allow_shell_commands)
-        self.assertEqual(review.session.workspace.read_paths, ("${SUBCWD}/.",))
+        self.assertEqual(review.session.workspace.read_paths, ("${SUBCWD}/.", str(Path.cwd() / "data/page_fetch")))
+        self.assertIn("snapshots/<snapshot_id>.<html|pdf|txt>", review_context[-1])
+        self.assertIn("raw_path", review_context[-1])
+        self.assertIn("text_path", review_context[-1])
+        self.assertIn(str(Path.cwd() / "data/page_fetch/snapshots"), job.config.workspace.read_paths)
         self.assertEqual(review.session.workspace.write_paths, ())
         self.assertTrue(review.reuse_session)
         self.assertTrue(review.enable_peer_exchange)
@@ -333,6 +356,8 @@ class RecruitmentCodexJobApiTests(unittest.TestCase):
 
     def _assert_research_subagents(self, subagents, parent):
         self.assertIsInstance(subagents, SubagentConfig)
+        self.assertEqual(parent.web_search, "live")
+        self.assertEqual(subagents.session.web_search, "live")
         self.assertEqual(
             subagents.allowed_models,
             {"gpt-6-luna": ("high",)},

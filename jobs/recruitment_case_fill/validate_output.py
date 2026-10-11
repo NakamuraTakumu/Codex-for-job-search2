@@ -16,6 +16,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
 from jobs.common.validator_helpers import (
     fail,
     load_collected_output_file,
+    validate_date_retrieval,
 )
 from jobs.common.output_paths import RECRUITMENT_CASE_OUTPUT_PATH
 from schemas.recruitment_case_models import RecruitmentCase
@@ -26,6 +27,8 @@ def validate_recruitment_case_output(
     subcwd,
     expected_company_id,
     expected_recruitment_year,
+    fetched_urls=(),
+    fetch_log_path=None,
 ):
     """Validate the collected file and raise ValueError with a repair diagnostic."""
     _, recruitment_case, error = load_collected_output_file(
@@ -35,6 +38,8 @@ def validate_recruitment_case_output(
     )
     if error:
         raise ValueError(error)
+
+    validate_date_retrieval(recruitment_case, fetched_urls=fetched_urls, log_path=fetch_log_path)
 
     if recruitment_case.publishing_company_id != expected_company_id:
         raise ValueError(

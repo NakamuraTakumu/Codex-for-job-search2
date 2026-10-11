@@ -56,12 +56,17 @@ class IndustryCodesSchemaTests(unittest.TestCase):
 
 
 class DateRangeSchemaTests(unittest.TestCase):
+    def date_metric(self, value, url):
+        found = metric(value, url=url)
+        found["records"][0]["retrieval"] = {"method": "web_tool", "crawled_label": None, "observed_on": None}
+        return found
+
     def window(self, open_, deadline, open_url="u1", deadline_url="u1"):
         return {
             "window_name": None,
             "source": src("https://example.com/w"),
-            "application_open_date": metric(open_, url=f"https://example.com/{open_url}"),
-            "application_deadline_date": metric(deadline, url=f"https://example.com/{deadline_url}"),
+            "application_open_date": self.date_metric(open_, f"https://example.com/{open_url}"),
+            "application_deadline_date": self.date_metric(deadline, f"https://example.com/{deadline_url}"),
         }
 
     def test_range_order(self):

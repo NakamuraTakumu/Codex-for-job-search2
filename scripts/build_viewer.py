@@ -232,6 +232,22 @@ def records(metric) -> list[dict]:
     return (metric or {}).get("records") or []
 
 
+def date_retrieval_label(rec) -> str:
+    retrieval = (rec or {}).get("retrieval") or {}
+    if retrieval.get("method") == "host_fetch":
+        return ("手動取得 " if retrieval.get("origin") == "manual" else "取得 ") + str(retrieval.get("fetched_at") or "")[:10]
+    if retrieval.get("method") == "web_tool":
+        label = retrieval.get("crawled_label")
+        return "検索キャッシュ" + (f" ({label})" if label else "")
+    return ""
+
+
+def date_record_text(rec, fmt=fmt_date_range) -> str:
+    provenance = date_retrieval_label(rec)
+    text = fmt(rec["value"]) if rec.get("value") is not None else "後日案内"
+    return text + (f"（{provenance}）" if provenance else "")
+
+
 def kind_of(rec) -> str:
     return ((rec or {}).get("source") or {}).get("kind", "unofficial")
 
@@ -290,15 +306,19 @@ def window_date_cell(slots, field) -> list:
     """全応募回の field（応募開始日・締切）のうち最も早い日。"""
     for kind in KIND_ORDER:
         for slot, prev in slots:
-            vals = []
+            vals, later = [], []
             for w in (slot.get("application_windows") or {}).get("records") or []:
                 if kind_of(w) != kind:
                     continue
                 vals += [r["value"] for r in records(w.get(field)) if r.get("value")]
+                if evidence := (w.get(field) or {}).get("announced_later"):
+                    later.append(evidence)
             if vals:
                 v = min(vals, key=range_sort_key)
                 return cell(fmt_date_range(v), range_sort_key(v), ("前" if prev else "") + ("非" if kind != "official" else ""),
                             shift=shifted(v) if prev else None)
+            if later:
+                return cell("後日案内", None, ("前" if prev else "") + ("非" if kind != "official" else ""))
     return cell(MISSING)
 
 
@@ -359,7 +379,8 @@ def metric_detail(slots, mget, fmt, year):
 
 def window_date_detail(slots, field, year):
     """全応募回の field を候補にし、window_date_cell が採用した値の先頭に印を付ける。"""
-    chosen = window_date_cell(slots, field)[1]
+    chosen_cell = window_date_cell(slots, field)
+    chosen = chosen_cell[1]
     cands, notes, done = [], [], False
     for kind in KIND_ORDER:
         for slot, _prev in slots:
@@ -372,8 +393,12 @@ def window_date_detail(slots, field, year):
                     if r.get("value"):
                         hit = int(not done and range_sort_key(r["value"]) == chosen)
                         done = done or bool(hit)
-                        cands.append(cand(fmt_date_range(r["value"]), y, {**r, "source": r.get("source") or w.get("source")}, hit, name,
+                        cands.append(cand(date_record_text(r), y, {**r, "source": r.get("source") or w.get("source")}, hit, name,
                                      shifted(r["value"]) if y == 2 else None))
+                if later := (w.get(field) or {}).get("announced_later"):
+                    hit = int(not done and chosen_cell[0] == "後日案内")
+                    done = done or bool(hit)
+                    cands.append(cand(date_record_text(later), y, later, hit, name))
                 notes += metric_notes([(y, w.get(field))], name)
     for slot, _prev in slots:
         notes += metric_notes([(ycode(slot, year), slot.get("application_windows"))], "募集回")
@@ -473,6 +498,15 @@ def detail(title, slots) -> dict:
         process = {"marks": proc[2], "stages": [
             [st.get("label", "") for st in (stage.get("steps") or [])]
             for stage in (proc[0].get("stages") or [])]}
+    process_notes = []
+    for slot, prev in slots:
+        metric = (slot.get("selection_process") or {}).get("process")
+        ns = metric_notes([(2 if prev else 1, metric)], "選考補足")
+        if ns:
+            chosen = top([(records(metric), prev)])
+            # note 自体には source がない。工程の印を使い、Missing なら年度の印だけにする。
+            marks = chosen[1] if chosen else ("前" if prev else "")
+            process_notes += [n + [marks] for n in ns]
     windows, wmarks = [], ""
     for kind in KIND_ORDER:
         for slot, prev in slots:
@@ -480,7 +514,8 @@ def detail(title, slots) -> dict:
             if ws:
                 wmarks = ("前" if prev else "") + ("非" if kind != "official" else "")
                 for w in ws:
-                    j = lambda m, f=fmt_date_range: "・".join(dict.fromkeys(f(r["value"]) for r in records(m) if r.get("value"))) or MISSING
+                    j = lambda m, f=fmt_date_range: ("・".join(dict.fromkeys(date_record_text(r, f) for r in records(m) if r.get("value")))
+                                                    or (date_record_text(m["announced_later"]) if (m or {}).get("announced_later") else MISSING))
                     win = {"name": w.get("window_name") or MISSING,
                            "open": j(w.get("application_open_date")),
                            "deadline": j(w.get("application_deadline_date"))}
@@ -491,7 +526,8 @@ def detail(title, slots) -> dict:
                 break
         if windows:
             break
-    return {"title": title, "process": process, "windows": windows, "wmarks": wmarks}
+    return {"title": title, "process": process, "process_notes": process_notes,
+            "windows": windows, "wmarks": wmarks}
 
 
 INDUSTRY_FIELD = "industry_classification_codes"
@@ -825,6 +861,9 @@ def build_html(rows: list[list], groups: list[dict], companies: dict[str, dict],
         for cd in store.values():
             for n in cd[1]:
                 n[1] = notes.setdefault(n[1], len(notes))
+    for row in rows:
+        for n in row[-1].get("process_notes", []):
+            n[1] = notes.setdefault(n[1], len(notes))
     desc = column_descriptions()
     payload = {
         "urls": list(urls), "notes": list(notes),
@@ -1248,7 +1287,10 @@ function cands(p,cd){
    if(u){li.append(' ');const a=el('a',u.hostname);a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.title=u.href;li.append(a)}
    else if(raw)li.append(el('span',raw,'k'));
    ul.append(li)});p.append(ul)}
- cd[1].forEach(n=>{const d=el('div');d.style.marginTop='6px';d.append(el('div',n[0],'k'),el('div',D.notes[n[1]],'note'));p.append(d)})}
+ renderNotes(p,cd[1])}
+function renderNotes(p,notes){
+ notes.forEach(n=>{const d=el('div'),label=el('div',n[0],'k');d.style.marginTop='6px';badges(label,n[2]);
+  d.append(label,el('div',D.notes[n[1]],'note'));p.append(d)})}
 document.addEventListener('mousedown',e=>{if(!pop.hidden&&!pop.contains(e.target))closePop()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePop()});
 addEventListener('resize',closePop);
@@ -1278,6 +1320,7 @@ function renderPanel(){
  if(!d.process)p.append(el('div','—','na'));
  else{const ol=el('ol',undefined,'steps');d.process.stages.forEach(st=>{const li=el('li'),sp=el('span');
   st.forEach((x,i)=>{if(i)sp.append(' ／ ');sp.append(x)});li.append(sp);ol.append(li)});p.append(ol)}
+ renderNotes(p,d.process_notes||[]);
  const h2=el('h3','募集回');badges(h2,d.wmarks);p.append(h2);
  if(!d.windows.length)p.append(el('div','—','na'));
  d.windows.forEach(w=>{const div=el('div',undefined,'win'),dd=el('div',undefined,'d');div.append(el('div',w.name,'n'));

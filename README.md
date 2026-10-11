@@ -37,7 +37,7 @@ python3 scripts/fill_company_profile.py 1180301018771 "トヨタ自動車株式�
 
 単一企業の `recruitment_case` を生成します。第1引数は 13桁の法人番号である `company_id`、第2引数は法人名、 第3引数は対象の `recruitment_year` です。
 
-`recruitment_case_fill` runnerを1回実行し、募集枠の発見から各`ApplicationSlot`の調査までを行います。同じ応募枠に早期選考や複数回締切がある場合は、`application_windows`で募集回ごとの開始日と締切日の対応を保持します。
+`recruitment_case_fill` runnerを1回実行し、募集枠の発見から各`ApplicationSlot`の調査までを行います。同じ応募枠に早期選考や複数回締切がある場合は、`application_windows`で募集回ごとの開始日と締切日の対応を保持します。開始日・締切日が未定／後日案内と出典に明示される場合は、日付の`records`を空にして`announced_later`に`source`と`retrieval`を保持し、`note`も記録します。日付の記載が見つからない通常のMissingと区別し、閲覧ページには根拠付きの「後日案内」と表示します。日付の記録と`announced_later`は併存できません。
 
 ```bash
 python3 scripts/fill_recruitment_case.py 1180301018771 "トヨタ自動車株式会社" 2028
@@ -147,7 +147,7 @@ python3 scripts/build_viewer.py
 REPORT_ACCESS_PASSWORD='合言葉' python3 scripts/build_viewer.py
 ```
 
-公開するときは、`REPORT_ACCESS_PASSWORD` を設定してローカルでビルドし、生成された `site/index.html` を公開用 Pages リポジトリのルートに `index.html` として置きます。
+公開するときは、`REPORT_ACCESS_PASSWORD` を設定して `python3 scripts/publish_viewer.py` を実行します。暗号化版を生成し、`gh-pages` ブランチの `index.html` としてコミットします。公開は `git push origin gh-pages` で行います。
 
 1回のビルドで同じデータから2種類の HTML を出力します。
 

@@ -36,7 +36,9 @@ class RecruitmentCaseValidateOutputTests(unittest.TestCase):
     def _date_metric(self, value, url="https://example.com/recruit", kind="official"):
         if isinstance(value, str):
             value = {"earliest": value, "latest": value}
-        return self._found_metric(value, url=url, kind=kind)
+        metric = self._found_metric(value, url=url, kind=kind)
+        metric["records"][0]["retrieval"] = {"method": "web_tool", "crawled_label": None, "observed_on": None}
+        return metric
 
     def _found_slot_inventory(self, *identities):
         return {
@@ -65,16 +67,32 @@ class RecruitmentCaseValidateOutputTests(unittest.TestCase):
                     recruitment_year,
                     {**os.environ, "CODEX_WRAPPER_SUBCWD": tempdir},
                 )
-        proc = subprocess.run(
-            [sys.executable, str(VALIDATOR), company_id, recruitment_year],
-            input="completed",
-            text=True,
-            capture_output=True,
-            cwd=str(ROOT),
-            env=env,
-            check=False,
-        )
-        return proc
+        # CLI fixtures own their fetch logs; never depend on or write workspace data/.
+        def web_urls(value):
+            if isinstance(value, dict):
+                if value.get("retrieval", {}).get("method") == "web_tool":
+                    yield value["source"]["url"]
+                for child in value.values():
+                    yield from web_urls(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from web_urls(child)
+
+        with tempfile.TemporaryDirectory() as fetch_root:
+            Path(fetch_root, "failures.jsonl").write_text("".join(
+                json.dumps({"requested_url": url, "final_url": None, "reason": "fixture failure"}) + "\n"
+                for url in web_urls(payload)
+            ), encoding="utf-8")
+            bootstrap = (
+                "import runpy, sys; from pathlib import Path; "
+                "from jobs.common import page_fetch; "
+                "page_fetch.FETCH_ROOT = Path(sys.argv.pop(1)); "
+                "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"
+            )
+            return subprocess.run(
+                [sys.executable, "-c", bootstrap, fetch_root, str(VALIDATOR), company_id, recruitment_year],
+                input="completed", text=True, capture_output=True, cwd=str(ROOT), env=env, check=False,
+            )
 
     def _steps(self, *kinds):
         return [{"kind": kind, "label": kind} for kind in kinds]
@@ -136,6 +154,23 @@ class RecruitmentCaseValidateOutputTests(unittest.TestCase):
                 }
             ],
         }
+
+    def test_selection_activity_recording_rules_exposed_in_json_schema(self):
+        from schemas.recruitment_case_models import RecruitmentCase
+
+        definitions = RecruitmentCase.model_json_schema()["$defs"]
+        steps = definitions["SelectionProcessStage"]["properties"]["steps"]
+        process = definitions["SelectionProcess"]["properties"]["process"]
+        self.assertIn("必須の書類提出・登録", steps["description"])
+        for phrase in ("所属 stage や順序", "活動名を process の note", "Missing の場合も"):
+            self.assertIn(phrase, process["description"])
+        for phrase in ("便宜的な stage", "末尾の stage", "単独の process record にしない"):
+            self.assertIn(phrase, process["x-do_not"])
+        data = self._base_payload()
+        data["application_slots"][0]["selection_process"]["process"] = self._missing_metric(
+            "順序不明。必須活動: 履修履歴登録、PRシート提出。"
+        )
+        RecruitmentCase.model_validate(data)
 
     def test_application_slots_x_do_not_contains_non_main_flow_exclusion(self):
         from schemas.recruitment_case_models import RecruitmentCase

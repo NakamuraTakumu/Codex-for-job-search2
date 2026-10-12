@@ -1,11 +1,13 @@
-"""Host-only, plain HTTP page acquisition. Never import this into a sandbox tool.
+"""Host-only HTTP page acquisition with rendering for empty public HTML. Never import this into a sandbox tool.
 
 JobPageFetcher owns the invocation budget and fresh URL set; DNS checks, host
 spacing and robots cache are shared by all jobs in this process.
 """
 from __future__ import annotations
 
+import asyncio
 import email.utils
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import ipaddress
@@ -29,6 +31,8 @@ FETCH_ROOT = Path(__file__).resolve().parents[2] / "data" / "page_fetch"
 USER_AGENT = "company-survey-fetch/0.1 (personal job-search research; low-volume)"
 MAX_BYTES = 5 * 1024 * 1024
 _LOCK = threading.Lock()
+_RENDER_LOCK = threading.Lock()
+RENDER_TIMEOUT = 30
 _HOST_LOCKS: dict[str, threading.RLock] = {}
 _ROBOTS_LOCKS: dict[str, threading.Lock] = {}
 _LAST_REQUEST: dict[str, float] = {}
@@ -144,6 +148,8 @@ def _request_chain(url: str, state: dict) -> bytes:
     for hop in range(6):
         # Set even on failure so a rejected redirect is visible to callers.
         state["final_url"] = url
+        if _login_url(url):
+            raise ValueError("login pages are not fetched")
         status, headers, body = _curl_get(url)
         state.update(status=status, content_type=headers.get("content-type", ""))
         if status in {301, 302, 303, 307, 308}:
@@ -253,9 +259,119 @@ def _extract(content_type: str, body: bytes) -> str:
     return "\n".join(line for line in lines if line)
 
 
+CHALLENGE_TEXT_MAX_CHARS = 2000
+
+
 def _is_challenge(text: str, body: bytes) -> bool:
+    # Long pages can mention CAPTCHA in a comment form, so the text phrases count only on short pages.
     return bool(re.search(br"<title[^>]*>\s*just a moment", body, re.I)
-                or re.search(r"just a moment|captcha|checking your browser|verify (?:you are|that you are) human|ロボットではない", text, re.I))
+                or (len(text.strip()) <= CHALLENGE_TEXT_MAX_CHARS
+                    and re.search(r"just a moment|captcha|checking your browser|verify (?:you are|that you are) human|ロボットではない", text, re.I)))
+
+
+class _LoginPage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "input" and str(dict(attrs).get("type", "")).lower() == "password":
+            self.found = True
+
+    handle_startendtag = handle_starttag
+
+
+def _is_login(body: bytes) -> bool:
+    parser = _LoginPage()
+    parser.feed(body.decode("utf-8", errors="replace"))
+    return parser.found
+
+
+def _login_url(url: str) -> bool:
+    return bool(re.search(r"(?:^|/)(?:login|log-in|signin|sign-in)(?:[/.]|$)",
+                          urlsplit(url).path, re.I))
+
+
+async def _render_html(url: str) -> tuple[bytes, str, str]:
+    from playwright.async_api import async_playwright
+
+    async with asyncio.timeout(RENDER_TIMEOUT), async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
+        try:
+            async with asyncio.timeout(RENDER_TIMEOUT):
+                context = await browser.new_context(service_workers="block", accept_downloads=False)
+                errors = []
+
+                async def guarded_route(route):
+                    request = route.request
+                    main_navigation = request.is_navigation_request() and request.frame.parent_frame is None
+                    response = None
+                    try:
+                        if request.resource_type in {"image", "media", "font"}:
+                            await route.abort()
+                            return
+                        checked_target(request.url)
+                        if _login_url(request.url):
+                            raise ValueError("login pages are not fetched")
+                        if request.method != "GET":
+                            raise ValueError("only GET requests are fetched")
+                        response = await route.fetch(max_redirects=0, timeout=RENDER_TIMEOUT * 1000)
+                        length = response.headers.get("content-length")
+                        if length and int(length) > MAX_BYTES:
+                            raise ValueError("response exceeds 5 MiB")
+                        body = await response.body()
+                        if len(body) > MAX_BYTES:
+                            raise ValueError("response exceeds 5 MiB")
+                        if not 200 <= response.status < 400:
+                            raise ValueError(f"HTTP {response.status}; no bypass attempted")
+                        if request.resource_type == "document" and not 300 <= response.status < 400:
+                            mime = response.headers.get("content-type", "")
+                            text = _extract(mime, body)
+                            if _is_challenge(text, body):
+                                raise ValueError("bot challenge detected; no bypass attempted")
+                        await route.fulfill(response=response, body=body)
+                    except Exception as exc:
+                        if main_navigation:
+                            errors.append(ValueError(str(exc)))
+                        await route.abort()
+                    finally:
+                        if response is not None:
+                            await response.dispose()
+
+                await context.route("**/*", guarded_route)
+                page = await context.new_page()
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=RENDER_TIMEOUT * 1000)
+                except Exception:
+                    if errors:
+                        raise errors[0]
+                    raise
+                if errors:
+                    raise errors[0]
+                rendered = await page.evaluate("""limit => {
+                    const html = document.documentElement.outerHTML;
+                    const text = (document.body?.innerText || '').trim();
+                    if (new TextEncoder().encode(html).length > limit ||
+                        new TextEncoder().encode(text).length > limit) return null;
+                    return {html, text};
+                }""", MAX_BYTES)
+                if rendered is None:
+                    raise ValueError("rendered response exceeds 5 MiB")
+                return rendered["html"].encode("utf-8"), rendered["text"], page.url
+        finally:
+            await browser.close()
+
+
+def _render_page(url: str) -> tuple[bytes, str, str]:
+    """A fresh browser, serialized per process; safe even in an asyncio caller."""
+    checked_target(url)
+    if _login_url(url):
+        raise ValueError("login pages are not fetched")
+    with _RENDER_LOCK, ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            return pool.submit(lambda: asyncio.run(_render_html(url))).result()
+        except Exception as exc:
+            raise ValueError(f"browser rendering failed: {exc}") from exc
 
 
 def _append_jsonl(path: Path, entry: dict):
@@ -272,7 +388,7 @@ def _append_jsonl(path: Path, entry: dict):
 def _record_failure(result: dict, attempted_at: str, context: dict | None = None):
     entry = {"requested_url": result["requested_url"], "final_url": result.get("final_url"),
              "attempted_at": attempted_at, "status": result.get("status"),
-             "reason": result["error"], "robots_allowed": result.get("robots_allowed"),
+             "content_type": result.get("content_type"), "reason": result["error"], "robots_allowed": result.get("robots_allowed"),
              "category": "url_rejection" if "SSRF guard:" in result["error"] else "fetch_failure",
              **(context or {})}
     _append_jsonl(FETCH_ROOT / "failures.jsonl", entry)
@@ -345,6 +461,8 @@ def import_snapshot(url: str, path: Path, fetched_at: str | None = None) -> dict
         content_type = "text/plain"
     else:
         raise ValueError("saved page must be HTML, PDF or plain text (.txt)")
+    if content_type == "text/html" and _is_login(body):
+        raise ValueError("saved page is a login page (password input)")
     text = _extract(content_type, body)
     if not text.strip():
         raise ValueError("saved page has no visible text")
@@ -390,6 +508,8 @@ def _persist(result: dict, body: bytes, text: str):
             if not text_path.exists():
                 text_path.write_text(text, encoding="utf-8")
             entry = {key: result[key] for key in ("requested_url", "final_url", "fetched_at", "status", "content_type", "snapshot_id", "origin", "raw_path", "text_path", "bytes", "text_chars", "robots_allowed")}
+            if result.get("browser_rendered"):
+                entry["browser_rendered"] = True
             entry["sha256"] = digest
             # Import time can differ from manual acquisition time. Resolution
             # uses when a successful entry was logged, not an old saved date.
@@ -413,8 +533,12 @@ def _fetch_page(url: str, context: dict | None = None) -> str:
                   snapshot_id=None, robots_allowed=None, error=None, origin="host")
     try:
         checked_target(url)  # reject before even fetching robots.txt
+        if _login_url(url):
+            raise ValueError("login pages are not fetched")
         result["robots_allowed"] = _robots_allowed(url)
         body = _request_chain(url, result)
+        if len(body) > MAX_BYTES:
+            raise ValueError("response exceeds 5 MiB")
         result["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if result["final_url"] != url:
             final_allowed = _robots_allowed(result["final_url"])
@@ -430,6 +554,22 @@ def _fetch_page(url: str, context: dict | None = None) -> str:
         text = _extract(result["content_type"], body)
         if _is_challenge(text, body):
             raise ValueError("bot challenge detected; no bypass attempted")
+        mime = result["content_type"].split(";", 1)[0].strip().lower()
+        if not text.strip() and mime in {"text/html", "application/xhtml+xml"}:
+            body, text, final_url = _render_page(result["final_url"])
+            if final_url != result["final_url"]:
+                final_allowed = _robots_allowed(final_url)
+                if final_allowed is False or result["robots_allowed"] is False:
+                    result["robots_allowed"] = False
+                elif final_allowed is None:
+                    result["robots_allowed"] = None
+            result.update(browser_rendered=True, final_url=final_url,
+                          fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          content_type="text/html; charset=utf-8")
+            if len(body) > MAX_BYTES or len(text.encode("utf-8")) > MAX_BYTES:
+                raise ValueError("rendered response exceeds 5 MiB")
+            if _is_challenge(text, body):
+                raise ValueError("bot challenge detected; no bypass attempted")
         if not text.strip():
             raise ValueError("empty visible text")
         _persist(result, body, text)
@@ -445,6 +585,7 @@ def _fetch_page(url: str, context: dict | None = None) -> str:
                 manual = _manual_snapshot(url)
                 if manual:
                     live_error = result["error"]
+                    result.pop("browser_rendered", None)
                     result.update(ok=True, status=manual["status"], final_url=manual["final_url"],
                                   fetched_at=manual["fetched_at"], content_type=manual["content_type"],
                                   raw_path=manual["raw_path"], text_path=manual["text_path"],

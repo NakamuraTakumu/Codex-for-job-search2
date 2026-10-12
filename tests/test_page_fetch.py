@@ -1,4 +1,5 @@
 """No real network: DNS, curl and time are mocked in every acquisition test."""
+import asyncio
 import contextlib
 import hashlib
 import io
@@ -9,7 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from jobs.common import page_fetch as pf
 
@@ -38,7 +39,8 @@ class PageFetchTests(unittest.TestCase):
                    patch.object(pf.socket, "getaddrinfo", return_value=answers("8.8.8.8")),
                    patch.object(pf.subprocess, "run", side_effect=AssertionError("unexpected subprocess")),
                    patch.object(pf.time, "monotonic", side_effect=lambda: self.clock),
-                   patch.object(pf.time, "sleep", side_effect=self.sleep)]
+                   patch.object(pf.time, "sleep", side_effect=self.sleep),
+                   patch.object(pf, "_render_page", return_value=(b"<html></html>", "", URL))]
         self.mocks = [p.start() for p in patches]
         for p in patches:
             self.addCleanup(p.stop)
@@ -296,6 +298,64 @@ class PageFetchTests(unittest.TestCase):
         self.assertEqual(Path(result["raw_path"]).read_bytes(), body)
         self.assertIn(b'rowspan="3"', Path(result["raw_path"]).read_bytes())
 
+    def test_empty_html_renders_and_persists_rendered_dom(self):
+        body = b"<html><body><p>Rendered deadline</p></body></html>"
+        render = self.mocks[-1]
+        render.return_value = (body, "Rendered deadline", URL)
+        result = self.live(body=b"<script>dates</script>")
+        self.assertTrue(result["ok"])
+        render.assert_called_once_with(URL)
+        self.assertTrue(result["browser_rendered"])
+        self.assertEqual(Path(result["raw_path"]).read_bytes(), body)
+        self.assertEqual(Path(result["text_path"]).read_text(), "Rendered deadline")
+        self.assertTrue(pf.read_log(self.root / "log.jsonl")[0]["browser_rendered"])
+        self.assertFalse((self.root / "failures.jsonl").exists())
+
+    def test_blocked_and_challenge_pages_never_render(self):
+        for status, body in ((403, b""), (429, b""), (503, b""), (400, b""),
+                             (404, b""), (200, b"<title>Just a moment</title>")):
+            self.assertFalse(self.live(status=status, body=body)["ok"])
+        self.mocks[-1].assert_not_called()
+
+    def test_rendered_challenge_and_oversize_fail(self):
+        render = self.mocks[-1]
+        for body, text, expected in ((b"<p>captcha</p>", "captcha", "bot challenge"),
+                                      (b"x" * (pf.MAX_BYTES + 1), "text", "5 MiB")):
+            render.return_value = (body, text, URL)
+            result = self.live(body=b"<script>app</script>")
+            self.assertFalse(result["ok"])
+            self.assertIn(expected, result["error"])
+
+    def test_render_error_uses_manual_fallback(self):
+        path = Path(self.temp.name) / "saved.txt"
+        path.write_text("Saved deadline")
+        pf.import_snapshot(URL, path, STAMP)
+        self.mocks[-1].side_effect = ValueError("browser rendering failed")
+        result = self.live(body=b"<script>app</script>")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["origin"], "manual")
+        self.assertIn("browser rendering failed", result["live_error"])
+
+    def test_plain_empty_never_renders(self):
+        self.assertFalse(self.live(body=b"", headers={"Content-Type": "text/plain"})["ok"])
+        self.mocks[-1].assert_not_called()
+
+    def test_visible_html_with_password_input_is_fetched(self):
+        body = b'<p>Recruitment deadline</p><input type="password">'
+        result = self.live(body=body)
+        self.assertTrue(result["ok"])
+        self.assertEqual(Path(result["raw_path"]).read_bytes(), body)
+        self.assertEqual(Path(result["text_path"]).read_text(), "Recruitment deadline")
+        self.mocks[-1].assert_not_called()
+
+    def test_password_widget_does_not_block_rendering(self):
+        body = b'<p>Rendered deadline</p><input type="password">'
+        self.mocks[-1].return_value = (body, "Rendered deadline", URL)
+        result = self.live(body=b'<input type="password"><script>app</script>')
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["browser_rendered"])
+        self.mocks[-1].assert_called_once_with(URL)
+
     def test_empty_visible_text_is_failure_without_snapshot(self):
         result = self.live(body=b"<script>dates</script><p hidden>deadline</p>")
         self.assertFalse(result["ok"])
@@ -304,6 +364,8 @@ class PageFetchTests(unittest.TestCase):
         self.assertIsNone(result["raw_path"])
         self.assertIsNone(result["text_path"])
         self.assertFalse((self.root / "snapshots").exists())
+        self.mocks[-1].assert_called_once_with(URL)
+        self.assertIn("empty visible text", pf.read_log(self.root / "failures.jsonl")[0]["reason"])
 
     def test_plain_text_raw_and_companion_do_not_collide(self):
         body = b"  Saved deadline\r\n"
@@ -438,9 +500,32 @@ class PageFetchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 pf.import_snapshot(URL, path, STAMP)
 
+    def test_manual_import_rejects_password_inputs(self):
+        path = Path(self.temp.name) / "saved.html"
+        for body in ('<p>Login</p><input type="password">',
+                     "<INPUT TYPE = 'PASSWORD'/>", '<input type=password hidden>'):
+            path.write_text(body)
+            with self.assertRaisesRegex(ValueError, "login page"):
+                pf.import_snapshot(URL, path, STAMP)
+        self.assertFalse((self.root / "log.jsonl").exists())
+
     def test_manual_import_rejects_challenge_in_hidden_title(self):
         path = Path(self.temp.name) / "saved.html"
         path.write_text("<head><title>Just a moment...</title></head><body>Please wait</body>")
+        with self.assertRaisesRegex(ValueError, "bot challenge"):
+            pf.import_snapshot(URL, path, STAMP)
+        self.assertFalse((self.root / "log.jsonl").exists())
+
+    def test_manual_import_accepts_long_page_mentioning_captcha(self):
+        path = Path(self.temp.name) / "saved.html"
+        article = "<p>" + "ES締切一覧 " * 400 + "</p><p>reCaptcha の認証期間が終了しました。</p>"
+        path.write_text(article)
+        result = pf.import_snapshot(URL, path, STAMP)
+        self.assertIn("reCaptcha", Path(result["text_path"]).read_text())
+
+    def test_manual_import_rejects_short_challenge_page(self):
+        path = Path(self.temp.name) / "saved.html"
+        path.write_text("<p>ロボットではないことを確認してください</p><p>captcha</p>")
         with self.assertRaisesRegex(ValueError, "bot challenge"):
             pf.import_snapshot(URL, path, STAMP)
         self.assertFalse((self.root / "log.jsonl").exists())
@@ -597,6 +682,161 @@ class PageFetchTests(unittest.TestCase):
         for thread in threads:
             thread.join()
         self.assertEqual({e["index"] for e in pf.read_log(self.root / "failures.jsonl")}, set(range(20)))
+
+
+class RenderTests(unittest.TestCase):
+    def test_playwright_dom_and_browser_cleanup(self):
+        page = AsyncMock()
+        page.url = URL
+        page.evaluate.return_value = {"html": "<html>Rendered</html>", "text": "Rendered"}
+        context, browser = AsyncMock(), AsyncMock()
+        context.new_page.return_value = page
+        browser.new_context.return_value = context
+        playwright = MagicMock()
+        playwright.chromium.launch = AsyncMock(return_value=browser)
+        manager = MagicMock()
+        manager.__aenter__ = AsyncMock(return_value=playwright)
+        manager.__aexit__ = AsyncMock(return_value=False)
+        with patch("playwright.async_api.async_playwright", return_value=manager):
+            result = asyncio.run(pf._render_html(URL))
+        self.assertEqual(result, (b"<html>Rendered</html>", "Rendered", URL))
+        playwright.chromium.launch.assert_awaited_once_with(headless=True, args=["--disable-dev-shm-usage"])
+        browser.close.assert_awaited_once()
+        page.goto.assert_awaited_once_with(URL, wait_until="networkidle", timeout=30000)
+        page.goto.side_effect = RuntimeError("navigation failed")
+        browser.close.reset_mock()
+        with patch("playwright.async_api.async_playwright", return_value=manager):
+            with self.assertRaisesRegex(RuntimeError, "navigation failed"):
+                asyncio.run(pf._render_html(URL))
+        browser.close.assert_awaited_once()
+
+    def test_browser_main_requests_reject_blocked_challenge_and_size(self):
+        for status, body, expected in ((403, b"blocked", "HTTP 403"),
+                                      (200, b"<p>captcha</p>", "bot challenge"),
+                                      (200, b"x" * (pf.MAX_BYTES + 1), "5 MiB")):
+            with self.subTest(expected=expected):
+                page, context, browser, route, response = [AsyncMock() for _ in range(5)]
+                page.url = URL
+                response.status = status
+                response.headers = {"content-type": "text/html"}
+                response.body.return_value = body
+                route.fetch.return_value = response
+                route.request = MagicMock(url=URL, resource_type="document", method="GET")
+                route.request.is_navigation_request.return_value = True
+                route.request.frame.parent_frame = None
+                context.new_page.return_value = page
+                browser.new_context.return_value = context
+                playwright = MagicMock()
+                playwright.chromium.launch = AsyncMock(return_value=browser)
+                manager = MagicMock()
+                manager.__aenter__ = AsyncMock(return_value=playwright)
+                manager.__aexit__ = AsyncMock(return_value=False)
+                async def goto(*args, **kwargs):
+                    await context.route.call_args.args[1](route)
+                page.goto.side_effect = goto
+                with patch("playwright.async_api.async_playwright", return_value=manager), patch.object(pf, "checked_target"):
+                    with self.assertRaisesRegex(ValueError, expected):
+                        asyncio.run(pf._render_html(URL))
+                route.abort.assert_awaited_once()
+                route.fulfill.assert_not_awaited()
+                response.dispose.assert_awaited_once()
+                browser.close.assert_awaited_once()
+
+    def test_browser_rejections_only_fail_main_navigation(self):
+        for main in (False, True):
+            for kind in ("ssrf", "login", "post", "length", "body", "status", "iframe"):
+                with self.subTest(main=main, kind=kind):
+                    page, context, browser, route, response = [AsyncMock() for _ in range(5)]
+                    page.url = URL
+                    page.evaluate.return_value = {"html": '<p>Deadline</p><input type="password">', "text": "Deadline"}
+                    request = MagicMock(url=URL, resource_type="script", method="GET")
+                    request.is_navigation_request.return_value = main or kind == "iframe"
+                    request.frame.parent_frame = None if main else MagicMock()
+                    if main or kind == "iframe":
+                        request.resource_type = "document"
+                    if kind == "login":
+                        request.url = "https://example.com/login"
+                    if kind == "post":
+                        request.method = "POST"
+                    route.request = request
+                    response.status = 404 if kind in {"status", "iframe"} else 200
+                    response.headers = {"content-type": "text/html"}
+                    if kind == "length":
+                        response.headers["content-length"] = str(pf.MAX_BYTES + 1)
+                    response.body.return_value = b"x" * (pf.MAX_BYTES + 1) if kind == "body" else b"<p>Deadline</p>"
+                    route.fetch.return_value = response
+                    context.new_page.return_value = page
+                    browser.new_context.return_value = context
+                    playwright = MagicMock()
+                    playwright.chromium.launch = AsyncMock(return_value=browser)
+                    manager = MagicMock()
+                    manager.__aenter__ = AsyncMock(return_value=playwright)
+                    manager.__aexit__ = AsyncMock(return_value=False)
+                    async def goto(*args, **kwargs):
+                        await context.route.call_args.args[1](route)
+                    page.goto.side_effect = goto
+                    guard_error = ValueError("SSRF guard: blocked") if kind == "ssrf" else None
+                    with patch("playwright.async_api.async_playwright", return_value=manager), patch.object(
+                            pf, "checked_target", side_effect=guard_error):
+                        if main:
+                            with self.assertRaises(ValueError):
+                                asyncio.run(pf._render_html(URL))
+                        else:
+                            result = asyncio.run(pf._render_html(URL))
+                            self.assertEqual(result[1:], ("Deadline", URL))
+                    route.abort.assert_awaited_once()
+                    route.fulfill.assert_not_awaited()
+                    browser.close.assert_awaited_once()
+
+    def test_browser_timeout_closes_browser(self):
+        page, context, browser = AsyncMock(), AsyncMock(), AsyncMock()
+        context.new_page.return_value = page
+        browser.new_context.return_value = context
+        playwright = MagicMock()
+        playwright.chromium.launch = AsyncMock(return_value=browser)
+        manager = MagicMock()
+        manager.__aenter__ = AsyncMock(return_value=playwright)
+        manager.__aexit__ = AsyncMock(return_value=False)
+        async def goto(*args, **kwargs):
+            await asyncio.sleep(1)
+        page.goto.side_effect = goto
+        with patch("playwright.async_api.async_playwright", return_value=manager), patch.object(pf, "RENDER_TIMEOUT", .05):
+            with self.assertRaises(TimeoutError):
+                asyncio.run(pf._render_html(URL))
+        browser.close.assert_awaited_once()
+
+    def test_render_helper_works_inside_running_loop(self):
+        async def caller():
+            return pf._render_page(URL)
+        with patch.object(pf, "checked_target"), patch.object(pf, "_render_html", new_callable=AsyncMock) as render:
+            render.return_value = (b"html", "text", URL)
+            self.assertEqual(asyncio.run(caller()), (b"html", "text", URL))
+            render.assert_awaited_once_with(URL)
+
+    def test_renders_are_serialized(self):
+        active, peak = 0, 0
+        async def render(url):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(.01)
+            active -= 1
+            return b"html", "text", url
+        errors = []
+        def call():
+            try:
+                pf._render_page(URL)
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(pf, "checked_target"), patch.object(pf, "_render_html", side_effect=render):
+            threads = [threading.Thread(target=call) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(peak, 1)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
 
 
 if __name__ == "__main__":

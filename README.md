@@ -95,6 +95,34 @@ python3 scripts/survey_companies.py \
   --max-workers 5
 ```
 
+### ページ取得と手動保存のインポート
+
+ホスト側の `fetch_page` は、2xxのHTMLがchallengeやログイン画面ではなく、可視テキストだけが空の場合に限り、Playwrightのheadless Chromiumで同じURLを描画します。描画は1プロセスにつき同時に1件、約30秒・5 MiBまでで、毎回ブラウザーを閉じます。画像・動画・フォントは読み込まず、User-Agentの変更やCAPTCHA回避は行いません。描画したDOMは通常と同じsnapshot形式で保存し、取得ログに `browser_rendered: true` を付けます。PlaywrightとChromiumが必要です。非2xx・challengeや描画失敗は従来どおり失敗を記録し、手動snapshotがあれば使います。
+
+未解決の失敗を確認し、ブラウザーで保存したHTML / PDF / TXTを取り込む場合:
+
+```bash
+python3 scripts/page_fetch_failures.py --json
+python3 scripts/import_page_snapshot.py https://example.com/recruit saved.html \
+  --fetched-at 2026-10-11T00:00:00+00:00
+```
+
+### `scripts/import_page_server.py`
+
+Tailscale経由のインポートページを起動します。`--host` にこのマシンのTailscale IP、`--public-name` にMagicDNS名（`tailscale status` で確認）を渡します。表示されたランダムtoken付きURLを自分のブラウザーで開いてください。接続できない場合は同時に表示されるIP URLを使います。tokenを知る人はインポートできるため、URLを共有・公開しないでください。終了は `Ctrl+C` です。
+
+```bash
+python3 scripts/import_page_server.py --host "$(tailscale ip -4 | head -n1)" --public-name <MagicDNS名>
+# ローカル確認
+python3 scripts/import_page_server.py --host 127.0.0.1 --port 8765
+```
+
+403等の非2xx（400/404/410を除く。ブラウザーでも同じエラーになり、リクナビ・マイナビの掲載終了は400を返す）とbot challengeを法人ごとに表示します。非テキスト・可視テキストが空のページは対象外です。全体のdrop zoneはChrome保存HTMLの元URLコメント、またはMHTMLの元URLを厳密一致（フラグメントだけ除去）で照合します。PDFやFirefox保存など元URLのないファイルは対象URLの行にドロップするか、行のファイル選択を使います。元URLが行と異なるファイルは拒否します。
+
+MHTMLは主HTMLを取り出し、Dateを取得日時として保存します。それ以外はファイルの最終更新日時を使います。5 MiB超・challenge・ログイン画面（password input）等はCLIと同じ検証で拒否します。challengeは題名が「Just a moment」のページか、可視テキストが2000字以下で「captcha」等の語を含むページです（長い記事のコメント欄にあるreCAPTCHAの文言では拒否しません）。拒否したファイルは理由をサーバーの出力に表示し、本体を `tmp/import_rejected/` に控えます。結果はファイルごとに表示し、一覧の更新後もこのセッションで解決した行は「完了」と表示します。
+
+下部にはこのサーバー起動後にインポートした企業だけの再調査コマンドを表示します。法人リストを `tmp/` に作るコマンドと、既存の `scripts/survey_companies.py ... --revise --phase cases|profiles --company-ids ...` を年度・job種別ごとに生成します。表示するだけで実行はしません。サーバーを再起動するとセッションの対象企業はリセットされます。
+
 ### `scripts/corporate_number_lookup.py`
 
 法人番号 DB を参照専用で検索します。`search` / `lookup` / `stats` だけを持ち、read-only 環境でも使えます。

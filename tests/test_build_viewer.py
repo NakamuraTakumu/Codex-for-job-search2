@@ -899,13 +899,13 @@ class EvidencePopupTest(unittest.TestCase):
         html = self.html()
         self.assertIn("p.before(h)", html)  # 固定ヘッダーはスクロール本文の兄弟
         self.assertIn("#pop .pb{min-height:0;overflow:auto", html)
-        self.assertIn("new ResizeObserver(placePop).observe(pop)", html)
-        self.assertIn("pop.addEventListener('toggle',placePop,true)", html)
+        self.assertIn("new ResizeObserver(()=>{measureNotes();placePop()}).observe(pop)", html)
+        self.assertIn("pop.addEventListener('toggle',()=>{measureNotes();placePop()},true)", html)
         self.assertIn("document.addEventListener('scroll'", html)
         self.assertIn("max-height:calc(100dvh - 16px)", html)
         self.assertIn("['値','対象','種類','出典']", html)
         self.assertIn("定義 ▸", html)
-        self.assertIn("'メモ'", html)
+        self.assertIn("width:480px;max-width:calc(100vw - 16px)", html)
         for obsolete in ("function slotPop", "function selectionPop", "function evidenceGrid", "function otherRecords",
                          "#pop .shown", "#pop .egrid", "sel-evidence", "表示した結果"):
             self.assertNotIn(obsolete, html)
@@ -920,11 +920,75 @@ class EvidencePopupTest(unittest.TestCase):
         self.assertIn("リモート制度", bv.COLUMNS)
         self.assertIn("売上が一番目に大きい", bv.column_descriptions()["業種1位"]["short"])
 
+    def test_header_definition_is_inline_and_opens_below_title(self):
+        fn = self.html().split("function popHead", 1)[1].split("// 列ラベル", 1)[0]
+        result = self.node("""
+class Element {
+ constructor(tag,text,cls){this.tag=tag;this.textContent=text;this.cls=cls;this.children=[];this.attrs={}}
+ append(...xs){this.children.push(...xs)}
+ before(e){this.header=e}
+ setAttribute(k,v){this.attrs[k]=v}
+}
+const el=(...args)=>new Element(...args),pop=el('div');let placed=0;
+const placePop=()=>placed++,closePop=()=>{};
+function popHead%s
+const p=el('div');popHead(p,'初任給','会社 ・ 枠',['定義本文']);
+const t=p.header.children[0],row=t.children[1],button=row.children[1],definition=t.children[2];
+const initial={context:t.children[0].textContent,title:row.children[0].textContent,
+ rowClass:row.cls,button:button.textContent,hidden:definition.hidden,expanded:button.attrs['aria-expanded']};
+button.onclick();const opened={hidden:definition.hidden,expanded:button.attrs['aria-expanded'],text:definition.children[0].textContent};
+button.onclick();const closed=definition.hidden;
+const plain=el('div');popHead(plain,'列ラベル');
+console.log(JSON.stringify({initial,opened,closed,placed,plainCount:plain.header.children[0].children[0].children.length}));
+""" % fn)
+        self.assertEqual(result["initial"], {"context": "会社 ・ 枠", "title": "初任給", "rowClass": "title-row",
+                                             "button": "定義 ▸", "hidden": True, "expanded": "false"})
+        self.assertEqual(result["opened"], {"hidden": False, "expanded": "true", "text": "定義本文"})
+        self.assertTrue(result["closed"])
+        self.assertEqual((result["placed"], result["plainCount"]), (2, 1))
+
+    def test_notes_measure_rendered_lines_and_toggle_without_text_heuristics(self):
+        html = self.html()
+        fn = html.split("function measureNotes", 1)[1].split("function selectionTypes", 1)[0]
+        result = self.node("""
+const el=()=>({setAttribute(k,v){this[k]=v},remove(){this.parent.button=null}});
+let placed=0;const placePop=()=>placed++,getComputedStyle=()=>({lineHeight:'20px'});
+function note(height,width=200){const classes=new Set(),parent={button:null,querySelector(){return this.button}};
+ return {dataset:{},parentElement:parent,height,width,
+ classList:{remove(c){classes.delete(c)},toggle(c,on){on?classes.add(c):classes.delete(c)},contains(c){return classes.has(c)}},
+ getBoundingClientRect(){return {width:this.width,height:this.width?(classes.has('clamped')?40:this.height):0}},
+ after(button){parent.button=button;button.parent=parent}}}
+// 同じ文字数でも実測が違えば異なる扱い。非表示ブロックは幅0。
+const short=note(40),long=note(60),hidden=note(80,0),notes=[short,long,hidden];
+const pop={querySelectorAll(){return notes}};
+function measureNotes%s
+measureNotes();const initial={shortButton:!!short.parentElement.button,longClamped:long.classList.contains('clamped'),
+ label:long.parentElement.button.textContent,hiddenMeasured:!!hidden.dataset.measuredWidth};
+long.parentElement.button.onclick();const opened={clamped:long.classList.contains('clamped'),label:long.parentElement.button.textContent};
+measureNotes();const staysOpen=!long.classList.contains('clamped');long.parentElement.button.onclick();
+const closed={clamped:long.classList.contains('clamped'),label:long.parentElement.button.textContent};
+hidden.width=200;measureNotes();const newlyVisible=hidden.classList.contains('clamped');
+long.width=300;long.height=40;short.width=100;short.height=60;measureNotes();
+console.log(JSON.stringify({initial,opened,staysOpen,closed,newlyVisible,placed,
+ resizedShort:short.classList.contains('clamped'),resizedLongButton:!!long.parentElement.button}));
+""" % fn)
+        self.assertEqual(result["initial"], {"shortButton": False, "longClamped": True, "label": "続き ▸", "hiddenMeasured": False})
+        self.assertEqual(result["opened"], {"clamped": False, "label": "閉じる ▴"})
+        self.assertEqual(result["closed"], {"clamped": True, "label": "続き ▸"})
+        self.assertTrue(result["staysOpen"])
+        self.assertTrue(result["newlyVisible"])
+        self.assertTrue(result["resizedShort"])
+        self.assertFalse(result["resizedLongButton"])
+        self.assertEqual(result["placed"], 2)
+        self.assertIn("pop.hidden=false;measureNotes();placePop()", html)
+        self.assertIn("-webkit-line-clamp:2", html)
+
     def test_target_words_use_case_year_not_calendar_year(self):
         fn = re.search(r"function targetOf\(r,y\)\{[^\n]+\}", self.html())[0]
-        result = self.node("const NC=0,r=[{slot:{ry:2028}}];" + fn +
+        grad = re.search(r"const gradYear=[^\n]+", self.html())[0]
+        result = self.node("const NC=0,r=[{slot:{ry:2028}}];" + grad + fn +
                            ";console.log(JSON.stringify([0,1,2].map(y=>targetOf(r,y))))")
-        self.assertEqual(result, ["", "2028年卒の枠", "2027年卒の枠（前年度）"])
+        self.assertEqual(result, ["", "28卒", "27卒・前年度"])
 
     def test_selection_focus_is_the_clicked_types_and_empty_title_is_not_used(self):
         html = self.html()
@@ -958,16 +1022,20 @@ class EvidencePopupTest(unittest.TestCase):
         built = self.built(sl)
         salary, company = self.block_data(built, "[metricBlocks(r,CI('初任給'))[0],metricBlocks(r,CI('従業員数'))[0]]")
         self.assertEqual(salary["shown"], "30.7 万円/月")
-        self.assertEqual(salary["target"], "2027年卒の枠（前年度）")
+        self.assertEqual(salary["target"], "27卒・前年度")
         self.assertEqual(salary["records"][0]["value"], "30.7 万円/月")
         self.assertEqual(salary["records"][0]["kind"], "公式")
         self.assertTrue(salary["records"][0]["chosen"])
         self.assertIn("基本給のみ", salary["records"][0]["extra"][0])
         self.assertIn("記載なし", salary["records"][0]["extra"][1])
-        self.assertEqual(salary["notes"], [["2027年卒の枠について", "前年の記録"]])
+        self.assertEqual(salary["notes"], [["27卒・前年度について", "前年の記録"]])
         self.assertEqual(company["target"], "")
         self.assertEqual(company["records"][0]["target"], "")
         self.assertEqual(company["records"][0]["value"], "100 人")
+        current_slot = slot(2028, ["A"])
+        current_slot["starting_salary"] = {"records": [rec({"base_salary_yen": 307000})], "note": "当年の記録"}
+        current = self.block_data(self.built(current_slot), "metricBlocks(r,CI('初任給'))[0]")
+        self.assertEqual(current["notes"], [["28卒について", "当年の記録"]])
 
     def test_common_date_rows_are_sourced_even_when_shown_value_is_prediction(self):
         w = window("official", "2027-03-15")
@@ -1005,7 +1073,7 @@ class EvidencePopupTest(unittest.TestCase):
         process = next(b for b in blocks if b["name"] == "選考工程")
         self.assertEqual(process["shown"], "ES → ケース面接")
         self.assertEqual(process["records"][0]["value"], "ES → ケース面接")
-        self.assertEqual(process["notes"], [["工程 2027年卒の枠について", "工程の補足"]])
+        self.assertEqual(process["notes"], [["工程 27卒・前年度について", "工程の補足"]])
         self.assertEqual(next(b for b in blocks if b["name"] == "ES提出")["shown"], "—（記録なし）")
 
     def test_shared_renderer_keeps_five_rows_and_collapses_remainder(self):
@@ -1018,15 +1086,16 @@ class Element {
 }
 const el=(tag,text,cls)=>new Element(tag,text,cls),sourceLink=url=>el('a',url);
 function renderMetricBlock%s
-const p=el('div'),record={value:'値',target:'2028年卒の枠',kind:'公式',url:'https://example.org',extra:['基本給 記載なし','固定残業代 記載なし']};
+const p=el('div'),record={value:'値',target:'28卒',kind:'公式',url:'https://example.org',extra:['基本給 記載なし','固定残業代 記載なし']};
 renderMetricBlock(p,{name:'指標',shown:'値',target:'',records:Array.from({length:8},(_,j)=>({...record,chosen:j===0})),notes:[['対象年度','本文']]});
 const walk=(e,tag)=>[...(e.tag===tag?[e]:[]),...e.children.flatMap(c=>walk(c,tag))];
 const tables=walk(p,'table'),details=walk(p,'details'),chosen=walk(p,'tr').filter(e=>e.cls==='chosen');
 const empty=el('div');renderMetricBlock(empty,{name:'指標',shown:'—（記録なし）',target:'',records:[],notes:[],collapsed:true});
 console.log(JSON.stringify({rows:tables.map(t=>walk(t,'tbody')[0].children.length),headers:tables.map(t=>walk(t,'th').map(x=>x.text)),
  summary:walk(details[0],'summary')[0].text,chosen:chosen.length,mark:chosen[0].children[0].children[0].text,
- extra:walk(p,'div').filter(e=>e.cls==='record-extra')[0].text,emptyTag:empty.children[0].tag,emptyValue:walk(empty,'td')[0].text}));
+ headings:walk(p,'h3').map(e=>e.text),extra:walk(p,'div').filter(e=>e.cls==='record-extra')[0].text,emptyTag:empty.children[0].tag,emptyValue:walk(empty,'td')[0].text}));
 """ % fn)
+        self.assertEqual(result["headings"], [])
         self.assertEqual(result["rows"], [5, 3])
         self.assertEqual(result["headers"], [["値", "対象", "種類", "出典"]] * 2)
         self.assertEqual(result["summary"], "ほか 3件 ▸")
@@ -1042,6 +1111,8 @@ console.log(JSON.stringify({rows:tables.map(t=>walk(t,'tbody')[0].children.lengt
                     {"application_year": 2028, "slot_name": "正式なコース", "source": {"kind": "unofficial", "url": "https://other.example"}}],
                     "note": "収録の理由"}}
         block = self.block_data(bv.build_rows(PROFILES, [case]), "metricBlocks(r,CI('応募枠'))[0]")
+        self.assertEqual([r["target"] for r in block["records"]], ["27卒・前年度", "28卒"])
+        self.assertEqual(block["target"], "27卒・前年度")
         self.assertEqual([r["value"] for r in block["records"]], ["正式なコース", "正式なコース"])
         self.assertEqual([r["chosen"] for r in block["records"]], [True, False])
         self.assertEqual(block["extra"], "配属先：配属A、missing-profile")

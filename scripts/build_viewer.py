@@ -1111,27 +1111,30 @@ details.legend .help{margin:8px 0 2px;padding-top:8px;border-top:1px solid var(-
 .k{color:var(--mut);font-size:11px;margin-left:4px}
 tr.sel td{background:var(--sel)!important}
 tr.sel td.selc{outline:2px solid var(--hl);outline-offset:-2px}
-#pop{position:fixed;z-index:40;display:flex;flex-direction:column;width:600px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);max-height:calc(100dvh - 16px);overflow:hidden;overflow-wrap:anywhere;padding:0;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);font-size:13px;line-height:1.6;white-space:normal;text-align:left}
+#pop{position:fixed;z-index:40;display:flex;flex-direction:column;width:480px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);max-height:calc(100dvh - 16px);overflow:hidden;overflow-wrap:anywhere;padding:0;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);font-size:13px;line-height:1.6;white-space:normal;text-align:left}
 #pop[hidden]{display:none}
-#pop .ph{display:flex;flex:none;gap:8px;align-items:flex-start;font-size:15px;font-weight:700;line-height:1.4;padding:12px 16px;border-bottom:1px solid var(--line)}
+#pop .ph{display:flex;flex:none;gap:8px;align-items:flex-start;font-size:15px;font-weight:700;line-height:1.4;padding:8px 12px;border-bottom:1px solid var(--line)}
 #pop .ph .pt{flex:1;min-width:0}
 #pop .context{font-size:11px;font-weight:500;color:var(--mut);margin-bottom:3px}
-#pop .pb{min-height:0;overflow:auto;overscroll-behavior:contain;padding:12px 16px}
+#pop .pb{min-height:0;overflow:auto;overscroll-behavior:contain;padding:8px 12px}
 #pop .col-desc{margin:0}
-#pop h3{font-size:13px;margin:16px 0 6px}
+#pop h3{font-size:13px;margin:8px 0 4px}
 #pop .displayed{margin:4px 0 8px;font-weight:600}
 #pop .displayed .target{font-size:11px;color:var(--mut);font-weight:400;margin-left:8px}
-#pop .metric-block{margin-bottom:14px}#pop .metric-block h3{margin-top:0}
+#pop .metric-block{margin-bottom:8px}#pop .metric-block:last-child{margin-bottom:0}#pop .metric-block h3{margin-top:0}
 #pop .metric-block>summary,#pop .records>summary{cursor:pointer;font-weight:600;margin:6px 0}
 #pop .record-table{width:100%;table-layout:fixed;white-space:normal;font-size:12px}
-#pop .record-table th,#pop .record-table td{position:static;padding:6px 5px;white-space:normal;overflow-wrap:anywhere;border-bottom:1px solid var(--line);background:none;font-size:12px}
-#pop .record-table th{height:auto;cursor:default;color:var(--mut)}
-#pop .record-table th:nth-child(1){width:36%}#pop .record-table th:nth-child(2){width:25%}#pop .record-table th:nth-child(3){width:13%}#pop .record-table th:nth-child(4){width:26%}
+#pop .record-table th,#pop .record-table td{position:static;padding:3px 4px;white-space:normal;overflow-wrap:anywhere;border-bottom:1px solid var(--line);background:none;font-size:12px}
+#pop .record-table thead tr,#pop .record-table th{height:auto;cursor:default;color:var(--mut)}
+#pop .record-table th:nth-child(1){width:44%}#pop .record-table th:nth-child(2){width:20%}#pop .record-table th:nth-child(3){width:12%}#pop .record-table th:nth-child(4){width:24%}#pop .record-table td:nth-child(4){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #pop .record-table tr.chosen td{background:var(--soft)}
 #pop .record-extra{font-size:11px;color:var(--mut);font-weight:400;margin-top:2px}
 #pop .memo{margin-top:8px}#pop .memo-title{font-size:11px;color:var(--mut);margin-bottom:3px}
+#pop .title-row{display:flex;align-items:baseline;gap:8px}#pop-title{flex:1;min-width:0}
 #pop .ph .def{max-height:160px;overflow:auto;font-weight:400}
-#pop .ph .def>summary{list-style:none}#pop .ph .def>summary::-webkit-details-marker{display:none}
+#pop .def-toggle,#pop .note-toggle{border:0;padding:0;background:none;color:var(--mut);font:inherit;font-size:11px;cursor:pointer}
+#pop .def-toggle{flex:none}#pop .note-toggle{display:block;margin-top:2px}
+#pop .note.clamped{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
 #pop .x{flex:none;width:24px;height:24px;margin:-3px -6px 0 0;border:0;border-radius:6px;background:none;color:var(--mut);font-size:14px;line-height:1;cursor:pointer}
 #pop .x:hover{background:var(--hover);color:var(--fg)}
 #pop ul{margin:0;padding-left:18px}#pop li{margin-bottom:6px}#pop li::marker{color:var(--line2)}
@@ -1356,7 +1359,7 @@ function openPop(anchor,build){
  if(popAnchor){popAnchor.removeEventListener('pointerleave',leaveClose);popAnchor.removeEventListener('pointerenter',enterKeep)}
  popAnchor=anchor;anchor.addEventListener('pointerleave',leaveClose);anchor.addEventListener('pointerenter',enterKeep);
  pop.replaceChildren();const body=el('div',undefined,'pb');pop.append(body);build(body);
- pop.hidden=false;placePop()}
+ pop.hidden=false;measureNotes();placePop()}
 // 本文のスクロールは独立。表・ページが動いたらアンカーに追従し、アンカーが見えなくなれば閉じる。
 function placePop(){
  if(pop.hidden||!popAnchor)return;
@@ -1371,15 +1374,18 @@ function placePop(){
 function closePop(){cancelLeave();pop.hidden=true;pop.replaceChildren();
  if(popAnchor){popAnchor.removeEventListener('pointerleave',leaveClose);popAnchor.removeEventListener('pointerenter',enterKeep);popAnchor=null}}
 function popHead(p,title,context='',definition=[]){const h=el('div',undefined,'ph'),t=el('div',undefined,'pt');
- if(context)t.append(el('div',context,'context'));const metric=el('div',title);metric.id='pop-title';t.append(metric);pop.setAttribute('aria-labelledby',metric.id);
- if(definition.length){const d=el('details',undefined,'def');d.append(el('summary','定義 ▸'));definition.forEach(v=>d.append(el('p',v)));t.append(d)}
+ if(context)t.append(el('div',context,'context'));const row=el('div',undefined,'title-row'),metric=el('div',title);metric.id='pop-title';row.append(metric);t.append(row);pop.setAttribute('aria-labelledby',metric.id);
+ if(definition.length){const d=el('div',undefined,'def'),toggle=el('button','定義 ▸','def-toggle');d.id='pop-definition';d.hidden=true;toggle.type='button';toggle.setAttribute('aria-controls',d.id);toggle.setAttribute('aria-expanded','false');
+  toggle.onclick=()=>{d.hidden=!d.hidden;toggle.textContent=d.hidden?'定義 ▸':'定義 ▴';toggle.setAttribute('aria-expanded',String(!d.hidden));placePop()};
+  definition.forEach(v=>d.append(el('p',v)));row.append(toggle);t.append(d)}
  const x=el('button','✕','x');x.type='button';x.title='閉じる';x.setAttribute('aria-label','閉じる');x.onclick=closePop;h.append(t,x);p.before(h)}
 // 列ラベル・グループ見出しには値がないので、記録の欄は出さず列の説明だけを出す
 function columnPop(p,title,short,definition=[]){popHead(p,title,'',definition);p.append(el('p',short,'col-desc'))}
 function headerPop(i){return p=>columnPop(p,D.full[i],D.desc[i].short,D.desc[i].definition)}
 const SOURCE_WORDS={'公':'公式','非':'非公式','?':'不明'},SELECTION_WORDS={'工程':'選考工程','ES':'ES提出','Web':'Webテスト','筆記':'筆記試験','課題':'記述課題','GD':'グループディスカッション','集団面接':'集団面接','ケース':'ケース面接','面接':'面接','研究発表':'研究発表','コーディング':'コーディング課題'};
 const contextOf=r=>r[0][0]+' ・ '+r[1][0];
-function targetOf(r,y){const ry=r[NC].slot.ry;return y===1?ry+'年卒の枠':y===2?(ry-1)+'年卒の枠（前年度）':''}
+const gradYear=y=>String(y).slice(-2)+'卒';
+function targetOf(r,y){const ry=r[NC].slot.ry;return y===1?gradYear(ry):y===2?gradYear(ry-1)+'・前年度':''}
 function sourceLink(raw){const u=raw&&safeUrl(raw);if(!u)return el('span',raw||'記載なし');
  const a=el('a',u.hostname.replace(/^www\./,''));a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.title=u.href;return a}
 function money(v){return v===null||v===undefined?'記載なし':(v/10000).toFixed(1)+' 万円/月'}
@@ -1390,7 +1396,6 @@ function renderMetricBlock(p,b){
  else if(b.heading)block.append(el('h3',b.name+'：'+b.shown));
  p.append(block);const line=el('div','表示中：'+b.shown,'displayed');line.append(el('span',b.target,'target'));block.append(line);
  if(b.extra)block.append(el('div',b.extra,'record-extra'));
- block.append(el('h3','記録 '+b.records.length+'件'));
  const table=el('table',undefined,'record-table'),thead=el('thead'),head=el('tr');
  ['値','対象','種類','出典'].forEach(t=>head.append(el('th',t)));thead.append(head);table.append(thead);let body=el('tbody');table.append(body);block.append(table);
  b.records.forEach((record,j)=>{
@@ -1400,14 +1405,26 @@ function renderMetricBlock(p,b){
   if(record.extra.length)v.append(el('div',record.extra.join('・'),'record-extra'));
   tr.append(v,el('td',record.target||'—'),el('td',record.kind));const source=el('td');source.append(sourceLink(record.url));tr.append(source);body.append(tr)});
  if(!b.records.length){const tr=el('tr'),td=el('td','—（記録なし）');td.colSpan=4;tr.append(td);body.append(tr)}
- if(b.notes.length){block.append(el('h3','メモ'));b.notes.forEach(n=>{const memo=el('section',undefined,'memo');
+ if(b.notes.length){b.notes.forEach(n=>{const memo=el('section',undefined,'memo');
   if(n[0])memo.append(el('div',n[0],'memo-title'));memo.append(el('div',n[1],'note'));block.append(memo)})}
  return block}
+// 幅が確定している可視メモだけを実測する。閉じたブロックは toggle 後に測定する。
+function measureNotes(){
+ pop.querySelectorAll('.metric-block .note').forEach(note=>{
+  const width=note.getBoundingClientRect().width;if(!width||note.dataset.measuredWidth===String(width))return;
+  note.dataset.measuredWidth=String(width);const expanded=note.dataset.expanded==='true';note.classList.remove('clamped');
+  const long=note.getBoundingClientRect().height>parseFloat(getComputedStyle(note).lineHeight)*2+1;
+  let toggle=note.parentElement.querySelector('.note-toggle');
+  if(!long){if(toggle)toggle.remove();return}
+  if(!toggle){toggle=el('button',undefined,'note-toggle');toggle.type='button';note.after(toggle);
+   toggle.onclick=()=>{note.dataset.expanded=String(note.dataset.expanded!=='true');update();placePop()}}
+  function update(){const open=note.dataset.expanded==='true';note.classList.toggle('clamped',!open);toggle.textContent=open?'閉じる ▴':'続き ▸';toggle.setAttribute('aria-expanded',String(open))}
+  note.dataset.expanded=String(expanded);update()})}
 function selectionTypes(r,i){if(D.fold[i][0]==='ssub')return [D.columns[i]];
  return D.columns.filter((n,j)=>D.fold[j][0]==='ssub'&&r[j][0]==='○'&&['GD','集団面接','ケース','課題','研究発表','コーディング'].includes(n))}
 function metricBlockData(r,i,cd,name=D.columns[i]){
  const cs=cd[0],chosen=cs.find(c=>c[4]),salary=D.columns[i]==='初任給'||/^(学士|修士|博士)/.test(D.columns[i]),mainSalary=salary&&D.columns[i].endsWith('初任給');
- const unit=salary?'万円/月':unitOf(i),noteLabel=n=>n.replace(/今年度/g,r[NC].slot.ry+'年卒の枠について').replace(/前年度/g,(r[NC].slot.ry-1)+'年卒の枠について').replace(/^企業情報$/,'企業情報について');
+ const unit=salary?'万円/月':unitOf(i),noteLabel=n=>n.replace(/前年度/g,gradYear(r[NC].slot.ry-1)+'・前年度について').replace(/今年度/g,gradYear(r[NC].slot.ry)+'について').replace(/^企業情報$/,'企業情報について');
  const records=cs.map(c=>{const m=c[7]||{},extra=[];
   if(m.salary_kind){extra.push((m.salary_kind==='base_only'?'基本給のみ・':'')+'基本給 '+money(m.base_salary_yen));extra.push('固定残業代 '+money(m.fixed_overtime_yen)+(m.fixed_overtime_hours==null?'（時間：記載なし）':'（'+m.fixed_overtime_hours+'時間）'))}
   if(m.sourced_date){extra.push('募集回：'+(c[5]||'記載なし'));if(m.retrieval)extra.push(m.retrieval)}
@@ -1423,7 +1440,7 @@ function metricBlockData(r,i,cd,name=D.columns[i]){
  return {name,shown,target:chosen?targetOf(r,chosen[1]):'',records,notes:cd[1].map(n=>[noteLabel(n[0]),D.notes[n[1]]])}}
 // セル種別の差はデータの組み立てだけ。専用の描画・表・カードは持たない。
 function metricBlocks(r,i){
- if(i===1){const s=r[NC].slot,yearLabel=y=>y+'年卒の枠'+(y===s.ry-1?'（前年度）':'');
+ if(i===1){const s=r[NC].slot,yearLabel=y=>gradYear(y)+(y===s.ry-1?'・前年度':'');
   const picked=s.src.findIndex(x=>x[0]===s.year&&(x[2]||{}).source_kind==='official'),chosen=picked>=0?picked:s.src.findIndex(x=>x[0]===s.year);
   return [{name:'応募枠',shown:r[1][0]||'—（記録なし）',target:s.year?yearLabel(s.year):'',
    extra:'配属先：'+[s.assign,...s.others].filter(Boolean).join('、'),
@@ -1447,8 +1464,8 @@ document.addEventListener('mousedown',e=>{if(!pop.hidden&&!pop.contains(e.target
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePop()});
 addEventListener('resize',placePop);
 document.addEventListener('scroll',e=>{if(!pop.contains(e.target))placePop()},true);
-pop.addEventListener('toggle',placePop,true);
-new ResizeObserver(placePop).observe(pop);
+pop.addEventListener('toggle',()=>{measureNotes();placePop()},true);
+new ResizeObserver(()=>{measureNotes();placePop()}).observe(pop);
 const CI=n=>D.columns.indexOf(n),unitOf=i=>{const m=/（(.+)）$/.exec(D.full[i]);return m?m[1]:''};
 function valNode(c){const v=el('span');if(c[0]==='—'){v.className='na';v.append('—');return v}
  if(c[4])v.append(el('span',c[4],'pre'),' ');v.append(vnode(c));badges(v,c[2]);return v}

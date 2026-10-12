@@ -274,6 +274,13 @@ class BuildRowsTest(unittest.TestCase):
         self.assertIn("function buildHeader", html)
         self.assertIn('id="hd"', html)
 
+    def test_notice_on_accuracy_and_password_sharing(self):
+        html = bv.build_html(*self.built([slot(2028, ["A"])]))
+        pw = "出典には再配布できない情報が含まれるため、合言葉は他人に教えたり公開したりしないでください。"
+        self.assertIn("調査は AI（GPT-6 luna）が自動で行ったもので、誤りを含むことがあります。", html)
+        self.assertIn(pw, html)
+        self.assertIn(pw, bv.LOCK_HTML)
+
     def test_header_click_sorts_and_popup_has_no_sort_buttons(self):
         html = bv.build_html(*self.built([slot(2028, ["A"])]))
         self.assertIn("function sortClick", html)

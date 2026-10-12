@@ -1001,7 +1001,7 @@ LOCK_CSS = r"""#lock{min-height:100vh;display:flex;align-items:center;justify-co
 #lockerr{min-height:20px;margin-top:8px;font-size:13px;color:var(--warn)}
 """
 
-LOCK_HTML = r"""<div id="lock"><form id="lockform" autocomplete="off"><h1>企業調査一覧</h1><p>閲覧には合言葉が必要です。</p>
+LOCK_HTML = r"""<div id="lock"><form id="lockform" autocomplete="off"><h1>企業調査一覧</h1><p>閲覧には合言葉が必要です。</p><p>出典には再配布できない情報が含まれるため、合言葉は他人に教えたり公開したりしないでください。</p>
 <input id="pw" type="password" placeholder="合言葉" autocomplete="current-password" aria-label="合言葉" autofocus>
 <div id="lockerr" role="alert"></div><button type="submit" id="lockbtn">開く</button></form></div>
 """
@@ -1054,6 +1054,7 @@ h1{font-size:24px;line-height:1.3;font-weight:700;margin:0 0 2px}
 .sub{color:var(--mut);font-size:13px}
 .meta{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
 #info{margin-top:4px}
+.notice{margin:0 0 8px;color:var(--mut);font-size:12px}.notice b{color:var(--fg)}
 .tools{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px}
 .tgl{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--fg);cursor:pointer;user-select:none}
 .tgl input{accent-color:var(--hl);width:15px;height:15px;margin:0;cursor:pointer}
@@ -1195,6 +1196,7 @@ __LOCK_HTML__
 <label class="tgl" title="オフにすると公式（source.kind が official）の値だけを使用し、非公式・出典区分不明の候補を除外します"><input type="checkbox" id="unofficial" checked> 非公式</label>
 <input id="q" type="search" placeholder="すべての列から検索"></div>
 </header>
+<p class="notice"><b>注意</b>　調査は AI（GPT-6 luna）が自動で行ったもので、誤りを含むことがあります。大事な値は出典で確かめてください。出典には再配布できない情報が含まれるため、合言葉は他人に教えたり公開したりしないでください。</p>
 <details class="legend"><summary><span>値の右の印</span><span><span class="mk mk-p">30.7</span> 前年度の枠から採用</span><span><span class="mk mk-u">30.7</span> 非公式情報</span><span><span class="mk mk-m">30.7</span> 同順位に別の値あり</span><span><span class="mk-d">〃</span> 左の学位と同額</span><span class="more">使い方</span></summary>
 <div class="help">表の値の装飾：前＝青い字、非＝橙の点線の下線、+＝値の右上の小さな点（複数重なることもある。セルのツールチップに言葉で表示。ポップアップ・右パネルは従来どおり「前」「非」「+」のバッジ）。前：当年度の枠に値がなく、同名の前年度の枠から採用（応募枠名に付く場合は前年度のみの枠）。非：非公式情報（出典区分が不明なものを含む）。+：同順位に異なる値が複数あり先頭を表示。<br>
 優先順位：今年度公式 &gt; 前年度公式 &gt; 今年度非公式 &gt; 前年度非公式 &gt; 今年度不明 &gt; 前年度不明（企業情報は公式 &gt; 非公式 &gt; 不明）。「—」は情報なし。「〃」は左の学位（値のある直近のもの）と同額・同じ印で、クリックすると根拠を表示、並べ替えでは値として扱います。列見出しをクリックすると並べ替え（昇順 ▲ → 降順 ▼ → 解除）、重ねると説明を表示（スマホは長押し）、セルをクリックすると値の根拠を表示します。ツールバーの「前年度の日程を+1年」は表と右パネルの前年度の日付だけを1年後ろへずらします（「前年度」オン時のみ表示）。初任給の要約列は見出しの学位ボタンをクリックするたびに学士→修士→博士→最大→学士と切り替わります（右パネルの要約も同じ値）。見出しの ▸ ◂ ▾ で、選択した学位（または最大）の1列 ⇄ 学位別3列 ⇄ 内訳（基本給・固定残業代・その他。展開中はその学位の月給列を隠す）に切り替えられます。選考は見出しの ▸ ◂ で、まれな選考の記号だけ ⇄ 全10種の○×列に切り替えられます。</div>

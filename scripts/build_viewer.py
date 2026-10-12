@@ -147,11 +147,11 @@ def enum_fmt(labels, sep=", "):
 
 
 # 初任給の表示規約（この対応の唯一の説明）。学位ごとに（学/修/博, 基本給, 固定残業代, その他）の4列。
-# - 学/修/博の列は monthly_total_yen。null なら base_salary_yen で代用し、セルに「基」の接頭辞と
+# - 学/修/博の列は monthly_total_yen。null なら base_salary_yen で代用し、
 #   「月給額の記載がなく基本給のみ」の title を付ける（並べ替えは数値のまま）。
 # - 内訳列は 基本給・固定残業代・その他。その他 = monthly_total − base − (fixed or 0) で、total と base が両方分かるときだけ表示。
 # - 〃：学位別の列で、左の（値のある直近の）学位と表示・印・接頭辞・title が同じなら 〃 にする。基本給のみと月給額は同額でも別物。
-# - 折りたたみ列（初任給）は学位別の月給額セルの最大値。同額なら低い学位で、接頭辞は学位の頭文字。
+# - 折りたたみ列（初任給）は選択中の学位（初期値は学士）。最大を選んだ場合は同額なら低い学位で、接頭辞は学位の頭文字。
 DEGREES = ["学士", "修士", "博士"]
 SALARY_KEYS = {"学士": "starting_salary", "修士": "starting_salary_master", "博士": "starting_salary_doctor"}
 SALARY_PARTS = ("基本給", "固定残業代", "その他")
@@ -339,7 +339,8 @@ def selection_cells(slots) -> list:
 
 
 # --- セルの詳細（値の根拠） ---------------------------------------------------
-# 候補: [表示値, 年度(0=なし/1=今年度/2=前年度), 区分(公/非/?), URL, 採用(1/0), ラベル]
+# 候補: [表示値, 年度(0=なし/1=今年度/2=前年度), 区分(公/非/?), URL, 表示対象(1/0), ラベル,
+#        +1年の日付またはNone, 名前付きの表示情報（給与の種類・内訳、出典日・取得情報など）]
 # 埋め込み時に URL は D.urls、note 本文は D.notes への添字へ置き換える（同文が多いため）。
 # セル詳細: [候補のリスト, [[ラベル, note], ...]]。どちらも空なら None。
 YEAR_LABELS = {0: "企業情報", 1: "今年度", 2: "前年度"}
@@ -349,18 +350,20 @@ def ycode(slot, year) -> int:
     return 1 if slot.get("application_year") == year else 2
 
 
-def cand(text, y, rec, chosen=0, label="", shift=None) -> list:
+def cand(text, y, rec, chosen=0, label="", shift=None, metadata=None) -> list:
     kind = {"official": "公", "unofficial": "非"}.get(((rec or {}).get("source") or {}).get("kind"), "?")
-    return [text, y, kind, ((rec or {}).get("source") or {}).get("url") or "", chosen, label] + ([shift[0]] if shift else [])
+    return [text, y, kind, ((rec or {}).get("source") or {}).get("url") or "", chosen, label,
+            shift[0] if shift else None, metadata or {}]
 
 
 def pack(cands, notes):
     return [cands, notes] if cands or notes else None
 
 
-def metric_cands(tiers, fmt, label="") -> list:
-    """優先順に全候補を並べ、採用された先頭の1件に印を付ける。"""
-    out = [cand(fmt(r["value"]), y, r, 0, label) for recs, y, _u in _ordered(tiers) for r in recs]
+def metric_cands(tiers, fmt, label="", metadata=None) -> list:
+    """優先順に全候補を並べ、表示対象の先頭の1件に印を付ける。"""
+    out = [cand(fmt(r["value"]), y, r, 0, label, metadata=metadata(r["value"]) if metadata else None)
+           for recs, y, _u in _ordered(tiers) for r in recs]
     if out:
         out[0][4] = 1
     return out
@@ -394,11 +397,13 @@ def window_date_detail(slots, field, year):
                         hit = int(not done and range_sort_key(r["value"]) == chosen)
                         done = done or bool(hit)
                         cands.append(cand(date_record_text(r), y, {**r, "source": r.get("source") or w.get("source")}, hit, name,
-                                     shifted(r["value"]) if y == 2 else None))
+                                     shifted(r["value"]) if y == 2 else None,
+                                     {"sourced_date": fmt_date_range(r["value"]), "retrieval": date_retrieval_label(r)}))
                 if later := (w.get(field) or {}).get("announced_later"):
                     hit = int(not done and chosen_cell[0] == "後日案内")
                     done = done or bool(hit)
-                    cands.append(cand(date_record_text(later), y, later, hit, name))
+                    cands.append(cand(date_record_text(later), y, later, hit, name,
+                                      metadata={"sourced_date": "後日案内", "retrieval": date_retrieval_label(later)}))
                 notes += metric_notes([(y, w.get(field))], name)
     for slot, _prev in slots:
         notes += metric_notes([(ycode(slot, year), slot.get("application_windows"))], "募集回")
@@ -407,9 +412,11 @@ def window_date_detail(slots, field, year):
 
 def selection_detail(slots, year):
     cands, notes = [], []
-    for field, label in SELECTION_FLAGS:
+    for field, label in [("process", "工程"), *SELECTION_FLAGS]:
         ms = [(ycode(s, year), (s.get("selection_process") or {}).get(field)) for s, _ in slots]
-        cands += metric_cands([(records(m), y) for y, m in ms], fmt_bool, label)
+        fmt = (lambda v: " → ".join(" ／ ".join(st.get("label", "") for st in stage.get("steps") or [])
+                                    for stage in v.get("stages") or []) or "工程なし") if field == "process" else fmt_bool
+        cands += metric_cands([(records(m), y) for y, m in ms], fmt, label)
         notes += metric_notes(ms, label)
     return pack(cands, notes)
 
@@ -421,7 +428,7 @@ def salary_metric(slot, key) -> dict:
     return {**m, "records": [{**r, "value": val(r.get("value") or {}), "raw": r.get("value") or {}} for r in records(m)]}
 
 
-BASE_ONLY_PRE, BASE_ONLY_TIP = "基", "月給額の記載がなく基本給のみ"
+BASE_ONLY_TIP = "月給額の記載がなく基本給のみ"
 
 
 def salary_fmt(v) -> str:
@@ -451,7 +458,7 @@ def salary_cells(slots, key) -> list:
         return [cell(MISSING) for _ in range(4)]
     (rec, marks), v = t, t[0]["raw"]
     if v.get("monthly_total_yen") is None:
-        out = [cell(salary_fmt(rec["value"]), rec["value"], marks, BASE_ONLY_TIP, BASE_ONLY_PRE)]
+        out = [cell(salary_fmt(rec["value"]), rec["value"], marks, BASE_ONLY_TIP)]
     else:
         out = [cell(salary_fmt(rec["value"]), rec["value"], marks)]
     for name in SALARY_PARTS:
@@ -470,7 +477,7 @@ def max_salary_cell(degree_cells) -> list:
     if best is None:
         return cell(MISSING), None
     c = degree_cells[best]
-    return cell(c[0], c[1], c[2], BASE_ONLY_TIP if c[4:5] == [BASE_ONLY_PRE] else "", DEGREES[best][0]), best
+    return cell(c[0], c[1], c[2], c[3] if len(c) > 3 else "", DEGREES[best][0]), best
 
 
 def salary_text(v) -> str:
@@ -600,7 +607,8 @@ def slot_info(profiles, case, base, name, prev_only, cid, year) -> dict:
         "name": name, "year": base.get("application_year"), "prev": prev_only, "ry": year,
         "assign": company_name(profiles, cid) if cid else None,
         "others": [company_name(profiles, i) for i in ids if i != cid],
-        "src": [[r.get("application_year"), (r.get("source") or {}).get("url") or ""]
+        "src": [[r.get("application_year"), (r.get("source") or {}).get("url") or "",
+                 {"source_kind": (r.get("source") or {}).get("kind") or "unknown"}]
                 for r in inv.get("records") or [] if r.get("slot_name") == name],
         "note": (inv.get("note") or "").strip(),
     }
@@ -612,7 +620,38 @@ def load_slot_short_names() -> dict[str, dict[str, str]]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+class ViewerRows(list):
+    """既定の行に、ビルド時に計算した表示区分別の結果を添える。"""
+
+
+def official_records(value, inherited="unofficial"):
+    """非公式・不明の記録を入力から除く。日付など出典省略の子記録は親の区分を継ぐ。"""
+    if isinstance(value, list):
+        return [official_records(v, inherited) for v in value]
+    if not isinstance(value, dict):
+        return value
+    kind = kind_of(value) if "source" in value else inherited
+    return {k: [official_records(r, kind) for r in v
+                if (kind_of(r) if "source" in r else kind) == "official"]
+            if k == "records" and isinstance(v, list)
+            else (None if k == "announced_later" and v and
+                  (kind_of(v) if "source" in v else kind) != "official"
+                  else official_records(v, kind))
+            for k, v in value.items()}
+
+
 def build_rows(profiles: dict[str, dict], cases: list[dict]):
+    """優先順位の判定は既存のセル生成に任せ、表示区分の4通りを作る。"""
+    rows, groups, companies = _build_rows(profiles, cases)
+    rows = ViewerRows(rows)
+    rows.variants = {}
+    for previous, unofficial in ((False, False), (False, True), (True, False)):
+        ps, cs = (profiles, cases) if unofficial else (official_records(profiles), official_records(cases))
+        rows.variants[f"{int(previous)}{int(unofficial)}"] = _build_rows(ps, cs, previous)
+    return rows, groups, companies
+
+
+def _build_rows(profiles: dict[str, dict], cases: list[dict], previous=True):
     """(行, 応募枠グループごとのセル詳細, 企業ごとのセル詳細) を返す。行は詳細への添字/IDだけを持つ。"""
     rows, groups, companies = [], [], {}
     slot_shorts = load_slot_short_names()
@@ -629,7 +668,7 @@ def build_rows(profiles: dict[str, dict], cases: list[dict]):
         for name, g in by_name.items():
             prev_only = "cur" not in g
             # 前年度のみの枠も、値のセルごとに「前」を付ける（応募枠名の「前」だけでは横に読んだとき気づきにくい）。
-            slots = [(g[k], k == "prev") for k in ("cur", "prev") if k in g]
+            slots = [(g[k], k == "prev") for k in ("cur", "prev") if k in g and (previous or k == "cur")]
             base = g.get("cur") or g["prev"]
             ids = ((base.get("assignment_companies") or {}).get("company_ids")) or []
             targets = ids or [None]
@@ -648,20 +687,23 @@ def build_rows(profiles: dict[str, dict], cases: list[dict]):
             for deg in DEGREES:
                 key = SALARY_KEYS[deg]
                 per_degree.append(salary_cells(slots, key))
-                # 内訳列も、月給額と同じ候補一覧（同じ記録に「採用」印）に、その列の値を見せる。
+                # 内訳列も月給額と同じ根拠記録を持ち、種類・学位・内訳の情報を失わない。
                 ms = [(ycode(s, year), salary_metric(s, key)) for s, _ in slots]
                 for n, part in enumerate(("初任給", *SALARY_PARTS)):
                     fmt = salary_text if n == 0 else (lambda v, nm=part: salary_part_text(v, nm))
                     ds[COL_INDEX[deg + part]] = pack(metric_cands(
-                        [([{**r, "value": r["raw"]} for r in records(m)], y) for y, m in ms], fmt),
+                        [([{**r, "value": r["raw"]} for r in records(m)], y) for y, m in ms], fmt,
+                        metadata=lambda v, degree=deg: {
+                            "degree": degree,
+                            "salary_kind": "monthly_total" if v.get("monthly_total_yen") is not None else "base_only",
+                            **{k: v.get(k) for k in ("monthly_total_yen", "base_salary_yen", "fixed_overtime_yen", "fixed_overtime_hours")},
+                        }),
                         metric_notes([(ycode(s, year), s.get(key)) for s, _ in slots]))
             best_cell, best = max_salary_cell([c[0] for c in per_degree])
             tail.append(best_cell)
             if best is not None:
                 ds[COL_INDEX["初任給"]] = copy.deepcopy(ds[COL_INDEX[DEGREES[best] + "初任給"]])  # 同じ object を共有しない（build_html が各セル詳細を1度ずつ添字化するため）
             tail += [c for cells in per_degree for c in cells]
-            # 枠のリモート勤務は多くが企業全体の制度からの流用で「リモ制」と重なるため、列にせず応募枠のポップアップに出す。
-            ds["remote"] = metric_detail(slots, lambda s: s.get("has_remote_work"), fmt_bool, year)
             gid = len(groups)
             groups.append({str(k): v for k, v in ds.items() if v})
             for cid in targets:
@@ -675,6 +717,8 @@ def build_rows(profiles: dict[str, dict], cases: list[dict]):
                     d["pub"] = pub_name
                 d["g"], d["p"] = gid, pid
                 d["slot"] = slot_info(profiles, case, base, name, prev_only, cid, year)
+                if not previous:
+                    d["slot"]["src"] = [s for s in d["slot"]["src"] if s[0] == year]
                 rows.append([name_cell(assign_name), *common] + tail + profile_cells(prof) + [pub_cell, d])
     return rows, groups, {k: v for k, v in companies.items() if v}
 
@@ -690,13 +734,13 @@ def column_descriptions() -> dict[str, dict]:
     short = {
         "配属先": "入社後に配属される企業。右側の企業情報はこの企業のもの。配属先が複数ある枠は配属先ごとに1行。",
         "採用元": "募集を出している企業（応募窓口）。",
-        "応募枠": "応募のコース・職種。クリックで配属先・リモート勤務・出典を表示。",
+        "応募枠": "応募のコース・職種。クリックで正式名称・配属先・記録・出典を表示。",
         "最初の募集開始": "全募集回のうち最も早い応募開始日。",
         "最初の締切": "全募集回のうち最も早い締切日。",
-        "初任給": "学士・修士・博士のうち最も高い月給。左の小さな字が学位。▸ で学位別に展開。",
+        "初任給": "見出しで選んだ学位の月給（初期値は学士）。最大は学位別の最高額で左に学位。▸ で学位別に展開。",
         "選考": "多くの枠にはない選考のうち、あるもの。G=GD 集=集団面接 ケ=ケース 課=課題 研=研究発表 コ=コーディング。▸ で全10種。",
         "業種": "主な事業（売上最大）の業種。▸ で売上の大きい順に最大3つを列に展開。",
-        **{p: f"売上が{n}番目に大きい事業の業種（なければ —）。" for n, p in zip("大二三", INDUSTRY_POS)},
+        **{p: f"売上が{n}番目に大きい事業の業種（なければ —）。" for n, p in zip("一二三", INDUSTRY_POS)},
         "平均年収": "従業員の平均年収。",
         "月残業": "従業員の月平均残業時間。",
         "年間休日": "年間休日の日数。",
@@ -717,7 +761,7 @@ def column_descriptions() -> dict[str, dict]:
     definition.update({
         "配属先": [],
         "採用元": [],
-        "応募枠": ["リモート勤務：" + slot["has_remote_work"].description],
+        "応募枠": [RecruitmentCase.model_fields["application_slot_inventory"].description],
         "最初の募集開始": [win["application_open_date"].description],
         "最初の締切": [win["application_deadline_date"].description],
         "初任給": [],
@@ -729,7 +773,7 @@ def column_descriptions() -> dict[str, dict]:
         short[label] = f"{web[label]}があるか（○あり ×なし —不明）。"
         definition[label] = [sel[field].description]
     for deg, key in SALARY_KEYS.items():
-        short[deg + "初任給"] = f"{deg}の月給額（固定残業代・固定手当を含む総額）。基本給しかなければ「基」付きで基本給。▸ で内訳。"
+        short[deg + "初任給"] = f"{deg}の月給額（固定残業代・固定手当を含む総額）。月給額がなければ基本給で代用。▸ で内訳。"
         short[deg + "基本給"] = f"{deg}の基本給（sourceが基本給として明示する月額）。"
         short[deg + "固定残業代"] = f"{deg}の月給額に含まれる固定残業代（みなし残業代）。セルをクリックすると対応する時間も表示。"
         short[deg + "その他"] = f"{deg}の月給額 − 基本給 − 固定残業代（調整手当などの固定手当）。月給額と基本給が両方分かるときだけ表示。"
@@ -849,21 +893,34 @@ def build_html(rows: list[list], groups: list[dict], companies: dict[str, dict],
     引数は変更しない（以下の桁揃え・添字化は複製に対して行う）。main は同じ入力で平文版と暗号化版を続けて作る。
     """
     rows, groups, companies = copy.deepcopy((rows, groups, companies))
-    unify_decimals(rows, groups, companies)
-    jst = timezone(timedelta(hours=9))
+    variants = getattr(rows, "variants", {})
     urls: dict[str, int] = {}
-    for store in [*groups, *companies.values()]:
-        for cd in store.values():
-            for c in cd[0]:
-                c[3] = urls.setdefault(c[3], len(urls)) if c[3] else -1
     notes: dict[str, int] = {}
-    for store in [*groups, *companies.values()]:
-        for cd in store.values():
-            for n in cd[1]:
+    for rs, gs, cs in [(rows, groups, companies), *variants.values()]:
+        unify_decimals(rs, gs, cs)
+        for store in [*gs, *cs.values()]:
+            for cd in store.values():
+                for c in cd[0]:
+                    c[3] = urls.setdefault(c[3], len(urls)) if c[3] else -1
+                for n in cd[1]:
+                    n[1] = notes.setdefault(n[1], len(notes))
+        for row in rs:
+            for n in row[-1].get("process_notes", []):
                 n[1] = notes.setdefault(n[1], len(notes))
-    for row in rows:
-        for n in row[-1].get("process_notes", []):
-            n[1] = notes.setdefault(n[1], len(notes))
+    # 共通の URL・note を添字化してから、既定（両方オン）との差分だけを持たせる。
+    def store_diff(base, other):
+        return {k: other.get(k) for k in base.keys() | other.keys() if base.get(k) != other.get(k)}
+
+    changes = {}
+    for mode, (rs, gs, cs) in variants.items():
+        changes[mode] = {
+            "rows": {str(i): {str(j): c for j, c in enumerate(r) if c != rows[i][j]}
+                     for i, r in enumerate(rs) if r != rows[i]},
+            "groups": {str(i): store_diff(groups[i], g) for i, g in enumerate(gs) if g != groups[i]},
+            "companies": {k: store_diff(companies.get(k, {}), cs.get(k, {}))
+                          for k in companies.keys() | cs.keys() if companies.get(k) != cs.get(k)},
+        }
+    jst = timezone(timedelta(hours=9))
     desc = column_descriptions()
     payload = {
         "urls": list(urls), "notes": list(notes),
@@ -872,7 +929,7 @@ def build_html(rows: list[list], groups: list[dict], companies: dict[str, dict],
         "desc": [desc[c] for c in COLUMNS], "numeric": sorted(NUMERIC_COLUMNS),
         "rows": rows,
         "fold": [fold_role(c) for c in COLUMNS], "hpath": [header_path(c) for c in COLUMNS],
-        "groups": groups, "companies": companies,
+        "groups": groups, "companies": companies, "variants": changes,
         "skipped": skipped,
         "built_at": datetime.now(jst).strftime("%Y-%m-%d %H:%M JST"),
     }
@@ -1000,6 +1057,13 @@ h1{font-size:24px;line-height:1.3;font-weight:700;margin:0 0 2px}
 .tools{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px}
 .tgl{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--fg);cursor:pointer;user-select:none}
 .tgl input{accent-color:var(--hl);width:15px;height:15px;margin:0;cursor:pointer}
+.previous{display:flex;flex-direction:column;gap:5px}
+#shift-wrap{margin-left:21px;font-size:12px}
+#shift-wrap[hidden]{display:none}
+.salary-controls{display:flex;flex-direction:column;align-items:center;gap:2px;margin:2px -6px 0}
+.salary-degree{width:40px;height:18px;padding:0;border:1px solid var(--line2);border-radius:4px;background:var(--surface);color:var(--fg);font:inherit;font-size:11px;cursor:pointer}
+.salary-controls .tg{flex:none;width:100%;height:14px;margin:0;border-radius:4px}
+.salary-controls .tg::after{top:0;bottom:0}
 .sh{font-style:italic}
 td.pv,.legend .mk-p{color:var(--prev-fg)}
 .mk-u{text-decoration:underline dotted;text-decoration-color:var(--warn);text-decoration-thickness:1.5px;text-underline-offset:3px}
@@ -1046,15 +1110,31 @@ details.legend .help{margin:8px 0 2px;padding-top:8px;border-top:1px solid var(-
 .k{color:var(--mut);font-size:11px;margin-left:4px}
 tr.sel td{background:var(--sel)!important}
 tr.sel td.selc{outline:2px solid var(--hl);outline-offset:-2px}
-#pop{position:fixed;z-index:40;width:360px;max-width:calc(100vw - 16px);max-height:70vh;overflow:auto;overflow-wrap:anywhere;padding:14px 16px;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);font-size:13px;line-height:1.6;white-space:normal;text-align:left}
+#pop{position:fixed;z-index:40;display:flex;flex-direction:column;width:600px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);max-height:calc(100dvh - 16px);overflow:hidden;overflow-wrap:anywhere;padding:0;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);font-size:13px;line-height:1.6;white-space:normal;text-align:left}
 #pop[hidden]{display:none}
-#pop .ph{display:flex;gap:8px;align-items:flex-start;font-size:14px;font-weight:700;line-height:1.4;margin-bottom:10px}
-#pop .ph span{flex:1}
+#pop .ph{display:flex;flex:none;gap:8px;align-items:flex-start;font-size:15px;font-weight:700;line-height:1.4;padding:12px 16px;border-bottom:1px solid var(--line)}
+#pop .ph .pt{flex:1;min-width:0}
+#pop .context{font-size:11px;font-weight:500;color:var(--mut);margin-bottom:3px}
+#pop .pb{min-height:0;overflow:auto;overscroll-behavior:contain;padding:12px 16px}
+#pop .col-desc{margin:0}
+#pop h3{font-size:13px;margin:16px 0 6px}
+#pop .displayed{margin:4px 0 8px;font-weight:600}
+#pop .displayed .target{font-size:11px;color:var(--mut);font-weight:400;margin-left:8px}
+#pop .metric-block{margin-bottom:14px}#pop .metric-block h3{margin-top:0}
+#pop .metric-block>summary,#pop .records>summary{cursor:pointer;font-weight:600;margin:6px 0}
+#pop .record-table{width:100%;table-layout:fixed;white-space:normal;font-size:12px}
+#pop .record-table th,#pop .record-table td{position:static;padding:6px 5px;white-space:normal;overflow-wrap:anywhere;border-bottom:1px solid var(--line);background:none;font-size:12px}
+#pop .record-table th{height:auto;cursor:default;color:var(--mut)}
+#pop .record-table th:nth-child(1){width:36%}#pop .record-table th:nth-child(2){width:25%}#pop .record-table th:nth-child(3){width:13%}#pop .record-table th:nth-child(4){width:26%}
+#pop .record-table tr.chosen td{background:var(--soft)}
+#pop .record-extra{font-size:11px;color:var(--mut);font-weight:400;margin-top:2px}
+#pop .memo{margin-top:8px}#pop .memo-title{font-size:11px;color:var(--mut);margin-bottom:3px}
+#pop .ph .def{max-height:160px;overflow:auto;font-weight:400}
+#pop .ph .def>summary{list-style:none}#pop .ph .def>summary::-webkit-details-marker{display:none}
 #pop .x{flex:none;width:24px;height:24px;margin:-3px -6px 0 0;border:0;border-radius:6px;background:none;color:var(--mut);font-size:14px;line-height:1;cursor:pointer}
 #pop .x:hover{background:var(--hover);color:var(--fg)}
 #pop ul{margin:0;padding-left:18px}#pop li{margin-bottom:6px}#pop li::marker{color:var(--line2)}
 #pop p{margin:0 0 8px}#pop .def{margin-top:4px;color:var(--mut);font-size:12px}#pop .def summary{cursor:pointer;margin-bottom:6px}#pop .note{white-space:pre-wrap;font-size:12px;color:var(--fg)}
-#pop .ok{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;background:var(--hl);color:var(--hlfg);font-size:10px;line-height:16px;vertical-align:middle}
 #pop .sort{display:flex;gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
 #pop .sort button{padding:4px 12px;border:1px solid var(--line2);border-radius:999px;background:var(--surface);color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
 #pop .sort button:hover{background:var(--hover)}
@@ -1111,11 +1191,13 @@ __LOCK_HTML__
 <div class="app" id="app"__APP_HIDDEN__>
 <header class="top">
 <div><h1>企業調査一覧</h1><div class="sub">配属先・応募枠ごとの選考、初任給、企業情報の比較</div><div class="meta" id="info"></div></div>
-<div class="tools"><label class="tgl" title="前年度の枠から採用した日付の年を1年後ろにずらして表示（今年度の枠の日付は変えない）"><input type="checkbox" id="shift"> 前年度の日程を+1年</label><input id="q" type="search" placeholder="すべての列から検索"></div>
+<div class="tools"><div class="previous"><label class="tgl" title="前年度の募集枠の行と値を表示"><input type="checkbox" id="previous" checked> 前年度</label><label class="tgl" id="shift-wrap" title="前年度の枠から採用した日程を+1年して表示（今年度の日付は変えない。右パネルも同じ日程）"><input type="checkbox" id="shift"> 前年度の日程を+1年</label></div>
+<label class="tgl" title="オフにすると公式（source.kind が official）の値だけを使用し、非公式・出典区分不明の候補を除外します"><input type="checkbox" id="unofficial" checked> 非公式</label>
+<input id="q" type="search" placeholder="すべての列から検索"></div>
 </header>
-<details class="legend"><summary><span>値の右の印</span><span><span class="mk mk-p">30.7</span> 前年度の枠から採用</span><span><span class="mk mk-u">30.7</span> 非公式情報</span><span><span class="mk mk-m">30.7</span> 同順位に別の値あり</span><span><span class="mk-d">〃</span> 左の学位と同額</span><span><span class="pre">基</span> 基本給のみ（月給額の記載なし）</span><span class="more">使い方</span></summary>
+<details class="legend"><summary><span>値の右の印</span><span><span class="mk mk-p">30.7</span> 前年度の枠から採用</span><span><span class="mk mk-u">30.7</span> 非公式情報</span><span><span class="mk mk-m">30.7</span> 同順位に別の値あり</span><span><span class="mk-d">〃</span> 左の学位と同額</span><span class="more">使い方</span></summary>
 <div class="help">表の値の装飾：前＝青い字、非＝橙の点線の下線、+＝値の右上の小さな点（複数重なることもある。セルのツールチップに言葉で表示。ポップアップ・右パネルは従来どおり「前」「非」「+」のバッジ）。前：当年度の枠に値がなく、同名の前年度の枠から採用（応募枠名に付く場合は前年度のみの枠）。非：非公式情報（出典区分が不明なものを含む）。+：同順位に異なる値が複数あり先頭を表示。<br>
-優先順位：今年度公式 &gt; 前年度公式 &gt; 今年度非公式 &gt; 前年度非公式 &gt; 今年度不明 &gt; 前年度不明（企業情報は公式 &gt; 非公式 &gt; 不明）。「—」は情報なし。「〃」は左の学位（値のある直近のもの）と同額・同じ印で、クリックすると根拠を表示、並べ替えでは値として扱います。列見出しをクリックすると並べ替え（昇順 ▲ → 降順 ▼ → 解除）、重ねると説明を表示（スマホは長押し）、セルをクリックすると値の根拠を表示します。初任給は見出しの ▸ ◂ ▾ で、最大値の1列 ⇄ 学位別3列 ⇄ 内訳（基本給・固定残業代・その他）に切り替えられます。選考は見出しの ▸ ◂ で、まれな選考の記号だけ ⇄ 全10種の○×列に切り替えられます。</div>
+優先順位：今年度公式 &gt; 前年度公式 &gt; 今年度非公式 &gt; 前年度非公式 &gt; 今年度不明 &gt; 前年度不明（企業情報は公式 &gt; 非公式 &gt; 不明）。「—」は情報なし。「〃」は左の学位（値のある直近のもの）と同額・同じ印で、クリックすると根拠を表示、並べ替えでは値として扱います。列見出しをクリックすると並べ替え（昇順 ▲ → 降順 ▼ → 解除）、重ねると説明を表示（スマホは長押し）、セルをクリックすると値の根拠を表示します。ツールバーの「前年度の日程を+1年」は表と右パネルの前年度の日付だけを1年後ろへずらします（「前年度」オン時のみ表示）。初任給の要約列は見出しの学位ボタンをクリックするたびに学士→修士→博士→最大→学士と切り替わります（右パネルの要約も同じ値）。見出しの ▸ ◂ ▾ で、選択した学位（または最大）の1列 ⇄ 学位別3列 ⇄ 内訳（基本給・固定残業代・その他。展開中はその学位の月給列を隠す）に切り替えられます。選考は見出しの ▸ ◂ で、まれな選考の記号だけ ⇄ 全10種の○×列に切り替えられます。</div>
 </details>
 <div class="layout"><div class="wrap"><table><thead id="hd"></thead><tbody id="tb"></tbody></table></div>
 <aside id="panel"></aside></div>
@@ -1138,10 +1220,15 @@ const FK='viewerSalaryFold';let fold={e:false,d:[false,false,false],s:false,i:fa
 try{const s=JSON.parse(localStorage.getItem(FK));if(s&&typeof s.e==='boolean'&&Array.isArray(s.d))fold={e:s.e,d:[0,1,2].map(k=>!!s.d[k]),s:!!s.s,i:!!s.i}}catch(e){}
 const DEGREE_NAMES=['学士','修士','博士'];
 const foldStyle=document.head.appendChild(document.createElement('style')),subTg={};
-const shown=i=>{const [r,k]=D.fold[i];return r==='max'?!fold.e:r==='deg'?fold.e:r==='sub'?fold.e&&fold.d[k]:r==='smax'?!fold.s:r==='ssub'?fold.s:r==='imax'?!fold.i:r==='isub'?fold.i:true};
+const shown=i=>{const [r,k]=D.fold[i];return r==='max'?!fold.e:r==='deg'?fold.e&&!fold.d[k]:r==='sub'?fold.e&&fold.d[k]:r==='smax'?!fold.s:r==='ssub'?fold.s:r==='imax'?!fold.i:r==='isub'?fold.i:true};
 function setFold(f){f();try{localStorage.setItem(FK,JSON.stringify(fold))}catch(e){}
  if(sortCol>=0&&!shown(sortCol))sortCol=-1;render()}
 function tg(txt,title,f){const t=el('button',txt,'tg');t.type='button';t.title=title;t.setAttribute('aria-expanded',txt==='▾'?'true':'false');t.onclick=e=>{e.stopPropagation();setFold(f)};return t}
+function degreeButton(){const b=el('button',view.degree,'salary-degree');b.type='button';b.setAttribute('aria-label','初任給の学位：'+view.degree);
+ b.title='クリックで学位を切り替え（学士→修士→博士→最大）';
+ // 見出しの並べ替え・長押しにボタン操作を伝えない。
+ ['pointerdown','pointerup','keydown','contextmenu'].forEach(t=>b.addEventListener(t,e=>e.stopPropagation()));
+ b.onclick=e=>{e.stopPropagation();setView(()=>{const ds=[...DEGREE_NAMES,'最大'];view.degree=ds[(ds.indexOf(view.degree)+1)%ds.length]})};return b}
 function applyFold(){
  foldStyle.textContent=D.columns.map((_,i)=>i).filter(i=>!shown(i)).map(i=>'.c'+i).join(',')+'{display:none}';
  buildHeader()}
@@ -1152,7 +1239,7 @@ let startCols=new Set();
 function sortClick(i){if(sortCol!==i){sortCol=i;sortDir=1}else if(sortDir===1)sortDir=-1;else sortCol=-1;render()}
 function headerEvents(th,i){let hov=0,lp=0,fired=false;
  const hoverOk=e=>e.pointerType==='mouse'&&matchMedia('(hover:hover)').matches;
- th.addEventListener('pointerenter',e=>{if(!hoverOk(e))return;clearTimeout(hov);hov=setTimeout(()=>openPop(th,headerPop(i)),250)});
+ th.addEventListener('pointerenter',e=>{if(!hoverOk(e))return;clearTimeout(hov);hov=setTimeout(()=>{if(th.isConnected&&!th.querySelector('.salary-controls:hover'))openPop(th,headerPop(i))},250)});
  th.addEventListener('pointerleave',()=>clearTimeout(hov));
  th.addEventListener('pointerdown',e=>{if(e.pointerType==='mouse')return;fired=false;clearTimeout(lp);lp=setTimeout(()=>{fired=true;openPop(th,headerPop(i))},500)});
  ['pointerup','pointercancel','pointerleave'].forEach(t=>th.addEventListener(t,()=>clearTimeout(lp)));
@@ -1174,7 +1261,7 @@ function buildHeader(){
     if(numeric.has(D.columns[i]))th.classList.add('num');
     if(x.r==='smax')th.append(tg('▸','選考を全10種の列に展開',()=>{fold.s=true}));
     if(x.r==='imax')th.append(tg('▸','業種を1位〜3位の3列に展開',()=>{fold.i=true}));
-    if(x.r==='max')th.append(tg('▸','学位別の3列に展開',()=>{fold.e=true}));
+    if(x.r==='max'){const controls=el('div',undefined,'salary-controls');controls.append(degreeButton(),tg('▸','学位別の3列に展開',()=>{fold.e=true}));th.append(controls)}
     if(x.r==='deg'&&!fold.d[x.k])th.append(tg('▸','内訳の列（基本給・固定残業代・その他）を表示',()=>{fold.d[x.k]=true}));
     headerEvents(th,i);rows[L].append(th);j++;continue}
    const key=x.path.slice(0,L+1).join('/');let n=1;
@@ -1182,19 +1269,31 @@ function buildHeader(){
    const name=x.path[L],th=el('th',name,'gh'+(L===0?' g0':'')+(startCols.has(x.i)?' gs':''));th.colSpan=n;th.style.top=L*HH+'px';
    const fo=name==='業種'?()=>{fold.i=false}:name==='選考'?()=>{fold.s=false}:name==='初任給'?()=>{fold.e=false}:DEGREE_NAMES.includes(name)?()=>{fold.d[DEGREE_NAMES.indexOf(name)]=false}:null;
    if(fo){th.append(tg('▾','',fo));th.querySelector('.tg').title=name==='業種'?'業種を主な事業の1列に畳む':name==='初任給'?'初任給を1列に畳む':name==='選考'?'選考をまれな選考の1列に畳む':name+'の内訳の列を隠す';th.title='クリックで畳む';th.onclick=()=>setFold(fo)}
-   else{th.title=GINFO[name]||'';th.onclick=()=>openPop(th,p=>{popHead(p,name);p.append(el('p',GINFO[name]||''))})}
+   else{th.title=GINFO[name]||'';th.onclick=()=>openPop(th,p=>columnPop(p,name,GINFO[name]||''))}
    rows[L].append(th);j+=n}}
  hd.replaceChildren(...rows);
  [...hd.querySelectorAll('th[data-col]')].forEach(th=>{const i=+th.dataset.col;th.classList.toggle('sorted',i===sortCol);th.querySelector('.lb').dataset.dir=sortDir>0?'▲':'▼'})}
-const SHK='viewerShiftPrev';let shiftOn=false;
-try{shiftOn=localStorage.getItem(SHK)==='1'}catch(e){}
-const shx=document.getElementById('shift');shx.checked=shiftOn;
+// --- 表示区分は Python が計算した差分を選ぶだけ。優先順位の判定はここには持たない ---
+const VK='viewerDisplay',SHK='viewerShiftPrev';let view={previous:true,unofficial:true,shift:false,degree:'学士'},shiftOn=false;
+try{const s=JSON.parse(localStorage.getItem(VK));if(s){for(const k of ['previous','unofficial','shift'])if(typeof s[k]==='boolean')view[k]=s[k];if([...DEGREE_NAMES,'最大'].includes(s.degree))view.degree=s.degree}
+ else view.shift=localStorage.getItem(SHK)==='1'}catch(e){}
+const shx=document.getElementById('shift'),prx=document.getElementById('previous'),unx=document.getElementById('unofficial');
+const original={rows:D.rows,groups:D.groups,companies:D.companies};
+function displayRows(){
+ const idx=selected?D.rows.indexOf(selected):-1,mode=Number(view.previous)+''+Number(view.unofficial),v=(D.variants||{})[mode]||{};
+ D.rows=original.rows.map((r,i)=>Object.assign([...r],(v.rows||{})[i]||{}));
+ D.groups=original.groups.map((g,i)=>Object.assign({},g,(v.groups||{})[i]||{}));
+ D.companies=Object.fromEntries(Object.entries(original.companies).map(([k,c])=>[k,Object.assign({},c,(v.companies||{})[k]||{})]));
+ if(view.degree!=='最大'){const i=D.columns.indexOf(view.degree+'初任給'),m=D.columns.indexOf('初任給');D.rows.forEach(r=>{r[m]=r[i]})}
+ selected=idx<0?null:D.rows[idx];shiftOn=view.previous&&view.shift;
+ prx.checked=view.previous;unx.checked=view.unofficial;shx.checked=view.shift;document.getElementById('shift-wrap').hidden=!view.previous;
+ D.rows.forEach(r=>r.hay=text(r))}
+function setView(f){f();try{localStorage.setItem(VK,JSON.stringify(view))}catch(e){}displayRows();render()}
 const SHT='前年度の日付を1年後ろにずらして表示';
 const sv=c=>shiftOn&&c[5]?c[5]:null; // ずらした [表示文字列, ソートキー]（前年度由来の日付のみ）
 const txt=c=>(sv(c)||c)[0];
 function vnode(c){const s=sv(c);if(!s)return document.createTextNode(c[0]);const e=el('span',s[0],'sh');e.title=SHT;return e}
-const text=r=>r.slice(0,NC).map(c=>c[0]+' '+(c[5]?c[5][0]+' ':'')+c[2]+' '+(c[3]||'')).join(' ').toLowerCase();
-D.rows.forEach(r=>r.hay=text(r));
+const text=r=>r.slice(0,NC).map(c=>txt(c)+' '+c[2]+' '+(c[3]||'')).join(' ').toLowerCase();
 function key(c,i){if(c[0]==='—')return null;const s=sv(c)?sv(c)[1]:c[1];
  if(numeric.has(D.columns[i])){const n=typeof s==='number'?s:parseFloat(String(c[0]).replace(/,/g,''));return isNaN(n)?String(c[0]):n}
  if(typeof s==='number')return s;return String(s??c[0])}
@@ -1208,10 +1307,12 @@ function dittoSrc(r,i){const [ro,k]=D.fold[i];if((ro!=='deg'&&ro!=='sub')||k<1||
  return -1}
 function render(){
  closePop();applyFold();
- let rows=D.rows.filter(r=>r.hay.includes(query));
+ const available=D.rows.filter(r=>view.previous||!r[NC].slot.prev);
+ let rows=available.filter(r=>r.hay.includes(query));
  if(sortCol>=0){const k=rows.map(r=>[r,key(r[sortCol],sortCol)]);
   k.sort((x,y)=>{if(x[1]===null||y[1]===null)return cmp(x[1],y[1]);return sortDir*cmp(x[1],y[1])});rows=k.map(x=>x[0])}
- if(!narrow()&&rows.length&&!rows.includes(selected))selected=rows[0];
+ if(selected&&!rows.includes(selected))selected=null;
+ if(!narrow()&&rows.length&&!selected)selected=rows[0];
  const f=document.createDocumentFragment();selTd=null;
  rows.forEach(r=>{const tr=document.createElement('tr');if(r===selected)tr.className='sel';
   tr.onclick=e=>{const td=e.target.closest('td');selected=r;selCol=td?td.cellIndex:-1;render();
@@ -1232,9 +1333,10 @@ function render(){
    if(base||words)td.title=[base,words].filter(Boolean).join('\n');tr.appendChild(td)});f.appendChild(tr)});
  tb.replaceChildren(f);
  renderPanel();
- info.textContent=`${rows.length} / ${D.rows.length} 行　生成: ${D.built_at}${D.skipped?`　（旧形式等で ${D.skipped} 件を除外）`:''}`;
+ info.textContent=`${rows.length} / ${available.length} 行　生成: ${D.built_at}${D.skipped?`　（旧形式等で ${D.skipped} 件を除外）`:''}`;
 }
 function cellDetail(r,i){const d=r[NC];if(i===1)return d.slot;
+ if(D.columns[i]==='初任給'&&view.degree!=='最大')i=CI(view.degree+'初任給');
  if(D.fold[i][0]==='ssub'){ // 選考の各列は「選考」列の候補・注記から、その選考の分だけ取り出す（別データは持たない）
   const all=(D.groups[d.g]||{})[CI('選考')];if(!all)return null;const l=D.columns[i];
   const c=all[0].filter(x=>x[5]===l),n=all[1].filter(x=>x[0].startsWith(l+' '));return c.length||n.length?[c,n]:null}
@@ -1251,52 +1353,104 @@ function openPop(anchor,build){
  cancelLeave();
  if(popAnchor){popAnchor.removeEventListener('pointerleave',leaveClose);popAnchor.removeEventListener('pointerenter',enterKeep)}
  popAnchor=anchor;anchor.addEventListener('pointerleave',leaveClose);anchor.addEventListener('pointerenter',enterKeep);
- pop.replaceChildren();build(pop);pop.hidden=false;
+ pop.replaceChildren();const body=el('div',undefined,'pb');pop.append(body);build(body);
+ pop.hidden=false;placePop()}
+// 本文のスクロールは独立。表・ページが動いたらアンカーに追従し、アンカーが見えなくなれば閉じる。
+function placePop(){
+ if(pop.hidden||!popAnchor)return;
+ if(!popAnchor.isConnected){closePop();return}
+ const a=popAnchor.getBoundingClientRect(),wrap=popAnchor.closest('.wrap'),v={left:0,top:0,right:innerWidth,bottom:innerHeight};
+ const b=wrap?wrap.getBoundingClientRect():v;
+ if(a.bottom<=Math.max(0,b.top)||a.top>=Math.min(innerHeight,b.bottom)||a.right<=Math.max(0,b.left)||a.left>=Math.min(innerWidth,b.right)){closePop();return}
  if(matchMedia('(max-width:800px)').matches){pop.style.left=pop.style.top='';return}
- const a=anchor.getBoundingClientRect(),w=pop.offsetWidth,h=pop.offsetHeight,vw=innerWidth,vh=innerHeight,g=8;
- let top=a.bottom+4;if(top+h>vh-g)top=a.top-h-4>=g?a.top-h-4:Math.max(g,vh-h-g);
- pop.style.left=Math.max(g,Math.min(a.left,vw-w-g))+'px';pop.style.top=top+'px'}
-function closePop(){cancelLeave();pop.hidden=true;pop.replaceChildren()}
-function popHead(p,title,marks){const h=el('div',undefined,'ph'),t=el('span',title);badges(t,marks);
- const x=el('button','✕','x');x.type='button';x.title='閉じる';x.setAttribute('aria-label','閉じる');x.onclick=closePop;h.append(t,x);p.append(h)}
-function headerPop(i){return p=>{popHead(p,D.full[i]);
- p.append(el('p',D.desc[i].short));
- if(D.desc[i].definition.length){const d=el('details',undefined,'def');d.append(el('summary','調査での定義'));
-  D.desc[i].definition.forEach(t=>d.append(el('p',t)));p.append(d)}
- }}
-function slotPop(r,p){const s=r[NC].slot,row=(k,v)=>{const d=el('div');d.append(el('span',k,'k'),' ',v);p.append(d)};
- popHead(p,D.full[1]+'：'+s.name,r[1][2]);
- row('応募年度',s.year+(s.prev?'（前年度の枠のみ。'+s.ry+'年度の同名の枠がなく、前年度の枠の値を表示 = 「前」）':''));
- row('配属先',s.assign||'未指定（採用元の情報を表示）');
- if(s.others.length)row('同じ枠の他の配属先',s.others.join('、'));
- s.src.forEach(x=>{const u=x[1]&&safeUrl(x[1]),d=el('div');d.append(el('span','枠の出典 '+x[0],'k'),' ');
-  if(u){const a=el('a',u.hostname);a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.title=u.href;d.append(a)}else d.append(x[1]||'—');p.append(d)});
- if(s.note)row('注記',s.note);
- const rw=(D.groups[r[NC].g]||{}).remote;
- if(rw){p.append(el('div','リモート勤務','k'));cands(p,rw)}else row('リモート勤務','情報なし')}
-function cellPop(r,i){return p=>{if(i===1)return slotPop(r,p);const cd=cellDetail(r,i);
- popHead(p,D.full[i]+'：'+(r[i][4]?r[i][4]+' ':'')+txt(r[i]),r[i][2]);cands(p,cd)}}
-function cands(p,cd){
- const YL=['','今年度','前年度'],KL={'公':'公式','非':'非公式','?':'不明'};
- if(cd[0].length){const ul=el('ul');
-  cd[0].forEach(c=>{const sh=shiftOn&&c[1]===2&&c[6],li=el('li',sh?undefined:c[0]);
-   if(sh){const e=el('span',c[6],'sh');e.title=SHT;li.append(e)}
-   if(c[4])li.append(el('span','採用','ok'));
-   li.append(el('span',[YL[c[1]],KL[c[2]]||c[2],c[5]].filter(Boolean).join('・'),'k'));
-   const raw=c[3]<0?'':D.urls[c[3]];const u=raw&&safeUrl(raw);
-   if(u){li.append(' ');const a=el('a',u.hostname);a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.title=u.href;li.append(a)}
-   else if(raw)li.append(el('span',raw,'k'));
-   ul.append(li)});p.append(ul)}
- renderNotes(p,cd[1])}
+ const w=pop.offsetWidth,h=pop.offsetHeight,g=8;
+ let top=a.bottom+4;if(top+h>innerHeight-g)top=a.top-h-4>=g?a.top-h-4:innerHeight-h-g;
+ pop.style.left=Math.max(g,Math.min(a.left,innerWidth-w-g))+'px';pop.style.top=Math.max(g,Math.min(top,innerHeight-h-g))+'px'}
+function closePop(){cancelLeave();pop.hidden=true;pop.replaceChildren();
+ if(popAnchor){popAnchor.removeEventListener('pointerleave',leaveClose);popAnchor.removeEventListener('pointerenter',enterKeep);popAnchor=null}}
+function popHead(p,title,context='',definition=[]){const h=el('div',undefined,'ph'),t=el('div',undefined,'pt');
+ if(context)t.append(el('div',context,'context'));const metric=el('div',title);metric.id='pop-title';t.append(metric);pop.setAttribute('aria-labelledby',metric.id);
+ if(definition.length){const d=el('details',undefined,'def');d.append(el('summary','定義 ▸'));definition.forEach(v=>d.append(el('p',v)));t.append(d)}
+ const x=el('button','✕','x');x.type='button';x.title='閉じる';x.setAttribute('aria-label','閉じる');x.onclick=closePop;h.append(t,x);p.before(h)}
+// 列ラベル・グループ見出しには値がないので、記録の欄は出さず列の説明だけを出す
+function columnPop(p,title,short,definition=[]){popHead(p,title,'',definition);p.append(el('p',short,'col-desc'))}
+function headerPop(i){return p=>columnPop(p,D.full[i],D.desc[i].short,D.desc[i].definition)}
+const SOURCE_WORDS={'公':'公式','非':'非公式','?':'不明'},SELECTION_WORDS={'工程':'選考工程','ES':'ES提出','Web':'Webテスト','筆記':'筆記試験','課題':'記述課題','GD':'グループディスカッション','集団面接':'集団面接','ケース':'ケース面接','面接':'面接','研究発表':'研究発表','コーディング':'コーディング課題'};
+const contextOf=r=>r[0][0]+' ・ '+r[1][0];
+function targetOf(r,y){const ry=r[NC].slot.ry;return y===1?ry+'年卒の枠':y===2?(ry-1)+'年卒の枠（前年度）':''}
+function sourceLink(raw){const u=raw&&safeUrl(raw);if(!u)return el('span',raw||'記載なし');
+ const a=el('a',u.hostname.replace(/^www\./,''));a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.title=u.href;return a}
+function money(v){return v===null||v===undefined?'記載なし':(v/10000).toFixed(1)+' 万円/月'}
+// DOM描画はこの関数だけ。セル・選考・応募枠・右パネルは同じブロックモデルを渡す。
+function renderMetricBlock(p,b){
+ const block=el(b.collapsed?'details':'section',undefined,'metric-block');
+ if(b.collapsed)block.append(el('summary',b.name+'：'+b.shown));
+ else if(b.heading)block.append(el('h3',b.name+'：'+b.shown));
+ p.append(block);const line=el('div','表示中：'+b.shown,'displayed');line.append(el('span',b.target,'target'));block.append(line);
+ if(b.extra)block.append(el('div',b.extra,'record-extra'));
+ block.append(el('h3','記録 '+b.records.length+'件'));
+ const table=el('table',undefined,'record-table'),thead=el('thead'),head=el('tr');
+ ['値','対象','種類','出典'].forEach(t=>head.append(el('th',t)));thead.append(head);table.append(thead);let body=el('tbody');table.append(body);block.append(table);
+ b.records.forEach((record,j)=>{
+  if(j===5){const d=el('details',undefined,'records');d.append(el('summary','ほか '+(b.records.length-5)+'件 ▸'));
+   const rest=table.cloneNode(false);rest.append(thead.cloneNode(true));body=el('tbody');rest.append(body);d.append(rest);block.append(d)}
+  const tr=el('tr',undefined,record.chosen?'chosen':''),v=el('td');v.append(el('div',(record.chosen?'● ':'')+record.value));
+  if(record.extra.length)v.append(el('div',record.extra.join('・'),'record-extra'));
+  tr.append(v,el('td',record.target||'—'),el('td',record.kind));const source=el('td');source.append(sourceLink(record.url));tr.append(source);body.append(tr)});
+ if(!b.records.length){const tr=el('tr'),td=el('td','—（記録なし）');td.colSpan=4;tr.append(td);body.append(tr)}
+ if(b.notes.length){block.append(el('h3','メモ'));b.notes.forEach(n=>{const memo=el('section',undefined,'memo');
+  if(n[0])memo.append(el('div',n[0],'memo-title'));memo.append(el('div',n[1],'note'));block.append(memo)})}
+ return block}
+function selectionTypes(r,i){if(D.fold[i][0]==='ssub')return [D.columns[i]];
+ return D.columns.filter((n,j)=>D.fold[j][0]==='ssub'&&r[j][0]==='○'&&['GD','集団面接','ケース','課題','研究発表','コーディング'].includes(n))}
+function metricBlockData(r,i,cd,name=D.columns[i]){
+ const cs=cd[0],chosen=cs.find(c=>c[4]),salary=D.columns[i]==='初任給'||/^(学士|修士|博士)/.test(D.columns[i]),mainSalary=salary&&D.columns[i].endsWith('初任給');
+ const unit=salary?'万円/月':unitOf(i),noteLabel=n=>n.replace(/今年度/g,r[NC].slot.ry+'年卒の枠について').replace(/前年度/g,(r[NC].slot.ry-1)+'年卒の枠について').replace(/^企業情報$/,'企業情報について');
+ const records=cs.map(c=>{const m=c[7]||{},extra=[];
+  if(m.salary_kind){extra.push((m.salary_kind==='base_only'?'基本給のみ・':'')+'基本給 '+money(m.base_salary_yen));extra.push('固定残業代 '+money(m.fixed_overtime_yen)+(m.fixed_overtime_hours==null?'（時間：記載なし）':'（'+m.fixed_overtime_hours+'時間）'))}
+  if(m.sourced_date){extra.push('募集回：'+(c[5]||'記載なし'));if(m.retrieval)extra.push(m.retrieval)}
+  let value=m.sourced_date||c[0];if(mainSalary&&m.salary_kind)value=money(m.monthly_total_yen??m.base_salary_yen);
+  else if(value==='○'||value==='×')value=value==='○'?'あり':'なし';
+  else if(unit&&value!=='—'&&!value.includes('万円'))value+=' '+unit;
+  return {value,target:targetOf(r,c[1]),kind:SOURCE_WORDS[c[2]]||'不明',url:c[3]>=0?D.urls[c[3]]:'',chosen:!!c[4],extra}});
+ let shown=r[i][0]==='—'?'—（記録なし）':txt(r[i]);if(shown==='○'||shown==='×')shown=shown==='○'?'あり':'なし';
+ else if(unit&&r[i][0]!=='—')shown+=' '+unit;
+ if(sv(r[i]))shown='予想 '+txt(r[i])+'（'+((chosen&&chosen[7]||{}).sourced_date||r[i][0])+' を+1年・未確定）';
+ if(salary){const degree=(chosen&&chosen[7]||{}).degree||(D.columns[i]==='初任給'?view.degree:D.columns[i].slice(0,2));
+  name=(D.columns[i]==='初任給'?'初任給':D.columns[i].slice(2))+'（'+degree+'）'}
+ return {name,shown,target:chosen?targetOf(r,chosen[1]):'',records,notes:cd[1].map(n=>[noteLabel(n[0]),D.notes[n[1]]])}}
+// セル種別の差はデータの組み立てだけ。専用の描画・表・カードは持たない。
+function metricBlocks(r,i){
+ if(i===1){const s=r[NC].slot,yearLabel=y=>y+'年卒の枠'+(y===s.ry-1?'（前年度）':'');
+  const picked=s.src.findIndex(x=>x[0]===s.year&&(x[2]||{}).source_kind==='official'),chosen=picked>=0?picked:s.src.findIndex(x=>x[0]===s.year);
+  return [{name:'応募枠',shown:r[1][0]||'—（記録なし）',target:s.year?yearLabel(s.year):'',
+   extra:'配属先：'+[s.assign,...s.others].filter(Boolean).join('、'),
+   records:s.src.map((x,j)=>({value:s.name,target:yearLabel(x[0]),kind:({'official':'公式','unofficial':'非公式'}[(x[2]||{}).source_kind]||'不明'),url:x[1],chosen:j===chosen,extra:[]})),
+   notes:s.note?[['応募枠の収録について',s.note]]:[]}]}
+ if(D.columns[i]==='選考'||D.fold[i][0]==='ssub'){
+  const cd=(D.groups[r[NC].g]||{})[CI('選考')]||[[],[]],focus=selectionTypes(r,i),names=['工程',...D.columns.filter((_,j)=>D.fold[j][0]==='ssub')];
+  names.sort((a,b)=>Number(focus.includes(b))-Number(focus.includes(a)));
+  return names.map((n,j)=>{const records=cd[0].filter(c=>c[5]===n),notes=cd[1].filter(x=>x[0].startsWith(n+' ')),col=n==='工程'?i:CI(n);
+   const b=metricBlockData(r,col,[records,notes],SELECTION_WORDS[n]||n);
+   if(n==='工程'){const c=records.find(c=>c[4]);b.shown=c?c[0]:'—（記録なし）'}
+   b.heading=true;b.collapsed=focus.length?!focus.includes(n):j>0;return b})}
+ return [metricBlockData(r,i,cellDetail(r,i)||[[],[]])]}
+function cellPop(r,i){return p=>{const blocks=metricBlocks(r,i),selection=D.columns[i]==='選考'||D.fold[i][0]==='ssub';
+ popHead(p,selection?'選考':blocks[0].name,contextOf(r),[D.desc[i].short,...D.desc[i].definition]);
+ blocks.forEach(b=>renderMetricBlock(p,b))}}
 function renderNotes(p,notes){
  notes.forEach(n=>{const d=el('div'),label=el('div',n[0],'k');d.style.marginTop='6px';badges(label,n[2]);
   d.append(label,el('div',D.notes[n[1]],'note'));p.append(d)})}
 document.addEventListener('mousedown',e=>{if(!pop.hidden&&!pop.contains(e.target))closePop()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePop()});
-addEventListener('resize',closePop);
+addEventListener('resize',placePop);
+document.addEventListener('scroll',e=>{if(!pop.contains(e.target))placePop()},true);
+pop.addEventListener('toggle',placePop,true);
+new ResizeObserver(placePop).observe(pop);
 const CI=n=>D.columns.indexOf(n),unitOf=i=>{const m=/（(.+)）$/.exec(D.full[i]);return m?m[1]:''};
 function valNode(c){const v=el('span');if(c[0]==='—'){v.className='na';v.append('—');return v}
  if(c[4])v.append(el('span',c[4],'pre'),' ');v.append(vnode(c));badges(v,c[2]);return v}
+function windowDate(w,k){const on=shiftOn&&w[k+'1']!==undefined&&w[k+'1']!==w[k];return [on?w[k+'1']:w[k],on]}
 function renderPanel(){
  const p=document.getElementById('panel');p.replaceChildren();
  if(!selected){p.append(el('div','行をクリックすると、募集回・選考工程・企業情報を表示します','empty'));return}
@@ -1306,7 +1460,7 @@ function renderPanel(){
  const stats=el('div',undefined,'stats');
  [['初任給',1],['平均年収'],['月残業'],['年間休日'],['有給取得'],['最初の締切']].forEach(([n,big])=>{const i=CI(n);if(i<0)return;
   const c=r[i],st=el('div',undefined,'stat'+(big?' big':'')),v=el('div',undefined,'v');
-  st.append(el('div',n==='初任給'?'初任給（学位の最大値）':n+(unitOf(i)?'（'+unitOf(i)+'）':''),'l'));
+  st.append(el('div',n==='初任給'?'初任給（'+(view.degree==='最大'?'学位の最大値':view.degree)+'）':n+(unitOf(i)?'（'+unitOf(i)+'）':''),'l'));
   v.append(valNode(c));if(big&&c[0]!=='—')v.append(el('span','万円/月','u'));st.append(v);stats.append(st)});
  p.append(stats);
  const facts=(names,title)=>{const ul=el('ul',undefined,'facts');
@@ -1324,15 +1478,16 @@ function renderPanel(){
  const h2=el('h3','募集回');badges(h2,d.wmarks);p.append(h2);
  if(!d.windows.length)p.append(el('div','—','na'));
  d.windows.forEach(w=>{const div=el('div',undefined,'win'),dd=el('div',undefined,'d');div.append(el('div',w.name,'n'));
-  const on=shiftOn&&w.open1!==undefined;
-  [['開始',on?w.open1:w.open],['締切',on?w.deadline1:w.deadline]].forEach(([l,t])=>{const s=el('span',l),e=!t||t==='—';const dt=el('span',e?'未定':t,'dt'+(e?' e':'')+(on&&!e?' sh':''));if(on&&!e)dt.title=SHT;s.append(dt);dd.append(s)});
+  [['開始','open'],['締切','deadline']].forEach(([l,k])=>{const [t,on]=windowDate(w,k),s=el('span',l),e=!t||t==='—';const dt=el('span',e?'未定':t,'dt'+(e?' e':'')+(on&&!e?' sh':''));if(on&&!e)dt.title=SHT;s.append(dt);dd.append(s)});
   div.append(dd);p.append(div)});
  const skip=new Set([...D.columns.filter((_,i)=>D.fold[i][0]==='ssub'||D.fold[i][0]==='isub'),'配属先','採用元','応募枠','最初の募集開始','最初の締切','選考','初任給','平均年収','月残業','年間休日','有給取得']);
  facts(D.columns.filter(n=>!skip.has(n)&&!/^(学士|修士|博士)/.test(n)),'企業情報（配属先）');
 }
-shx.onchange=()=>{shiftOn=shx.checked;try{localStorage.setItem(SHK,shiftOn?'1':'0')}catch(e){}render()};
+prx.onchange=()=>setView(()=>{view.previous=prx.checked});
+unx.onchange=()=>setView(()=>{view.unofficial=unx.checked});
+shx.onchange=()=>setView(()=>{view.shift=shx.checked});
 document.getElementById('q').oninput=e=>{query=e.target.value.trim().toLowerCase();render()};
-render();
+displayRows();render();
 }
 __BOOT__
 </script>

@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import copy
 import io
 import json
 import os
@@ -221,12 +222,13 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(r[COL["最初の締切"]], ["28/2/29", "2028-02-29", ""])
         self.assertNotIn("deadline1", r[-1]["windows"][0])
         cands, _ = self.cell_detail([cur], "最初の締切")
-        self.assertEqual(len(cands[0]), 6)
+        self.assertIsNone(cands[0][6])
+        self.assertEqual(cands[0][7]["sourced_date"], "28/2/29")
         # 今年度が優先されるときは今年度の値のまま、前年度の候補だけがずらし版を持つ
         r = self.rows([cur, prev])[0]
         self.assertEqual(len(r[COL["最初の締切"]]), 3)
         cands, _ = self.cell_detail([cur, prev], "最初の締切")
-        self.assertEqual([(c[1], len(c)) for c in cands], [(1, 6), (2, 7)])
+        self.assertEqual([(c[1], c[6]) for c in cands], [(1, None), (2, "28/5/5")])
 
     def sel_slot(self, year, **flags):
         s = slot(year, ["A"])
@@ -276,7 +278,11 @@ class BuildRowsTest(unittest.TestCase):
         html = bv.build_html(*self.built([slot(2028, ["A"])]))
         self.assertIn("function sortClick", html)
         self.assertIn("if(sortCol!==i){sortCol=i;sortDir=1}else if(sortDir===1)sortDir=-1;else sortCol=-1", html)
-        self.assertIn("setTimeout(()=>openPop(th,headerPop(i)),250)", html)
+        self.assertIn("if(th.isConnected&&!th.querySelector('.salary-controls:hover'))openPop(th,headerPop(i))", html)
+        # 列ラベル・グループ見出しは値を持たないので、記録の欄（表示中・記録表）を出さない
+        self.assertIn("function headerPop(i){return p=>columnPop(p,D.full[i],D.desc[i].short,D.desc[i].definition)}", html)
+        self.assertIn("openPop(th,p=>columnPop(p,name,GINFO[name]||''))", html)
+        self.assertNotIn("shown:'—（記録なし）',target:'',records:[]", html)
         self.assertIn("},500)", html)
         self.assertNotIn("良い順", html)
         # 折りたたみの ▸/▾ は stopPropagation で見出しのクリック（並べ替え）に伝えない
@@ -418,7 +424,7 @@ class OrdinalAndSlotTest(unittest.TestCase):
         s = rows[0][-1]["slot"]
         self.assertEqual((s["name"], s["year"], s["prev"], s["assign"], s["others"]),
                          ("S", 2028, False, "配属A", ["配属B"]))
-        self.assertEqual(s["src"], [[2028, "http://x"]])
+        self.assertEqual(s["src"], [[2028, "http://x", {"source_kind": "official"}]])
         self.assertEqual(s["note"], "注")
         self.assertEqual(rows[1][-1]["slot"]["assign"], "配属B")
 
@@ -625,7 +631,7 @@ class DittoTest(unittest.TestCase):
         r = self.salary_row_base_only()
         c = r[COL["学士初任給"]]
         self.assertEqual(c[:2], ["20.0", 200000])
-        self.assertEqual(c[3:5], ["月給額の記載がなく基本給のみ", "基"])
+        self.assertEqual(c[3:], ["月給額の記載がなく基本給のみ"])
         total = self.salary_row_total_only()[COL["学士初任給"]]
         self.assertEqual(len(total), 3)  # 月給額のセルには接頭辞も title もない
         # 畳んだ最大値の列は学位の頭文字のまま、title だけ基本給のみを示す
@@ -646,7 +652,418 @@ class DittoTest(unittest.TestCase):
 
     def test_base_only_legend(self):
         rows, groups, companies = bv.build_rows(PROFILES, [])
-        self.assertIn("基</span> 基本給のみ（月給額の記載なし）", bv.build_html(rows, groups, companies))
+        html = bv.build_html(rows, groups, companies)
+        self.assertNotIn("基</span> 基本給のみ", html)
+        self.assertNotIn("「基」付き", html)
+
+
+class DisplayModesTest(unittest.TestCase):
+    def built(self):
+        cur = slot(2028, ["A"], [(300000, "unofficial"), (310000, "unofficial")],
+                   [window("unofficial", "2028-04-01")])
+        prev = slot(2027, ["A"], [(250000, "official")], [window("official", "2027-03-01")])
+        cur["starting_salary_master"] = {"records": [rec({"monthly_total_yen": 280000})]}
+        cur["starting_salary_doctor"] = {"records": [rec({"monthly_total_yen": 400000}, "unknown")]}
+        prev["starting_salary_doctor"] = {"records": [rec({"base_salary_yen": 350000})]}
+        profiles = {**PROFILES, "A": profile("A", "配属A")}
+        profiles["A"]["basic_information"]["employee_count"] = {"records": [rec(200, "unknown")]}
+        return bv.build_rows(profiles, [{"recruitment_year": 2028, "publishing_company_id": "P",
+                                        "application_slots": [cur, prev, slot(2027, ["A"], name="前年だけ")]}])
+
+    def modes(self):
+        built = self.built()
+        return {"11": built, **built[0].variants}
+
+    def test_four_priority_combinations_and_details(self):
+        expected = {"11": (250000, "前"), "01": (300000, "非+"),
+                    "10": (250000, "前"), "00": (None, "")}
+        for mode, (rows, groups, _) in self.modes().items():
+            c = rows[0][COL["学士初任給"]]
+            self.assertEqual((c[1], c[2]), expected[mode])
+            cd = groups[0].get(str(COL["学士初任給"]))
+            candidates = cd[0] if cd else []
+            self.assertEqual(sum(c[4] for c in candidates), int(c[1] is not None))
+            if mode[0] == "0":
+                self.assertTrue(all(c[1] != 2 for c in candidates))
+            if mode[1] == "0":
+                self.assertTrue(all(c[2] == "公" for c in candidates))
+                self.assertEqual(rows[0][COL["従業員数"]][0], "—")
+
+    def test_max_salary_recomputed_after_exclusion(self):
+        for mode, (rows, groups, _) in self.modes().items():
+            expected = 350000 if mode[0] == "1" else 400000 if mode[1] == "1" else 280000
+            self.assertEqual(rows[0][COL["初任給"]][1], expected)
+            self.assertEqual(rows[0][COL["初任給"]][4], "修" if mode == "00" else "博")
+            self.assertTrue(groups[0][str(COL["初任給"])][0][0][4])
+
+    def test_date_cells_and_candidates_follow_mode(self):
+        for mode, (rows, groups, _) in self.modes().items():
+            c = rows[0][COL["最初の締切"]]
+            self.assertEqual(c[0], "27/3/1" if mode[0] == "1" else "28/4/1" if mode[1] == "1" else "—")
+            self.assertEqual(len(c) == 6, mode[0] == "1")
+            cd = groups[0].get(str(COL["最初の締切"]))
+            if mode[0] == "0":
+                self.assertTrue(all(c[1] != 2 for c in cd[0]) if cd else True)
+
+    def test_previous_only_rows_are_hidden_by_render(self):
+        built = self.built()
+        html = bv.build_html(*built)
+        condition = re.search(r"const available=D.rows.filter\((.*?)\);", html)[1]
+        script = "const NC=%d,D={rows:%s};for(const previous of [true,false]){const view={previous};console.log(D.rows.filter(%s).length)}" % (
+            len(bv.COLUMNS), json.dumps(built[0]), condition)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.split(), ["2", "1"])
+
+    def test_payload_deltas_reconstruct_cells_and_details(self):
+        built = self.built()
+        data = json.loads(re.search(r'<script id="data" type="application/json">(.*?)</script>',
+                                   bv.build_html(*built), re.S)[1])
+        for mode, values in self.modes().items():
+            rows, groups, companies = copy.deepcopy(values)
+            bv.unify_decimals(rows, groups, companies)
+            patch = data["variants"].get(mode, {}).get("rows", {})
+            for i, r in enumerate(rows):
+                actual = list(data["rows"][i])
+                for j, c in patch.get(str(i), {}).items():
+                    actual[int(j)] = c
+                self.assertEqual(actual[:len(bv.COLUMNS)], r[:len(bv.COLUMNS)])
+            for field, expected in (("groups", dict(enumerate(groups))), ("companies", companies)):
+                delta = data["variants"].get(mode, {}).get(field, {})
+                for k, store in expected.items():
+                    base = data[field][k] if field == "groups" else data[field].get(k, {})
+                    actual = copy.deepcopy({**base, **delta.get(str(k), {})})
+                    actual = {k: cd for k, cd in actual.items() if cd is not None}
+                    for cd in actual.values():
+                        for c in cd[0]:
+                            c[3] = data["urls"][c[3]] if c[3] >= 0 else ""
+                        for n in cd[1]:
+                            n[1] = data["notes"][n[1]]
+                    self.assertEqual(actual, store)
+        self.assertNotIn("11", data["variants"])
+
+    def test_expanded_degree_hides_monthly_column(self):
+        html = bv.build_html(*self.built())
+        expression = re.search(r"const shown=i=>\{(.*?)\};", html)[1]
+        script = "const D={fold:%s},fold={e:true,d:[false,false,true]};const shown=i=>{%s};console.log(JSON.stringify(D.fold.map((_,i)=>shown(i))))" % (
+            json.dumps([bv.fold_role(c) for c in bv.COLUMNS]), expression)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        shown = json.loads(result.stdout)
+        self.assertFalse(shown[COL["博士初任給"]])
+        self.assertTrue(shown[COL["博士基本給"]])
+        self.assertTrue(shown[COL["修士初任給"]])
+        self.assertIn("DEGREE_NAMES.indexOf(name)", html)  # 表示中のグループ見出しに閉じる操作がある
+
+    def test_degree_switch_is_scoped_to_summary_header(self):
+        html = bv.build_html(*self.built())
+        toolbar = re.search(r'<div class="tools">(.*?)</header>', html, re.S)[1]
+        self.assertNotIn("初任給", toolbar)
+        self.assertNotIn('id="degrees"', html)
+        self.assertNotIn(".degrees", html)
+        self.assertIn("if(x.r==='max'){const controls=", html)
+        self.assertIn("controls.append(degreeButton(),tg('▸'", html)
+        self.assertIn("見出しで選んだ学位", bv.column_descriptions()["初任給"]["short"])
+        self.assertIn("クリックで学位を切り替え（学士→修士→博士→最大）", html)
+        self.assertIn("flex-direction:column", html)
+        self.assertNotIn("function degreeSelect", html)
+
+    def test_degree_button_cycles_and_stops_header_events(self):
+        html = bv.build_html(*self.built())
+        fn = re.search(r"function degreeButton\(\)\{.*?return b\}", html, re.S)[0]
+        script = """
+const DEGREE_NAMES=['学士','修士','博士'];let view={degree:'学士'},saved=0,stopped=0;
+function el(tag,text,cls){return {tag,text,cls,attrs:{},events:{},
+ setAttribute(k,v){this.attrs[k]=v},addEventListener(k,f){this.events[k]=f}}}
+function setView(f){f();saved++}
+%s
+const initial=degreeButton(),states=[];
+for(const f of Object.values(initial.events))f({stopPropagation(){stopped++}});
+if(saved!==0)throw Error('pointer or key changed the view');
+for(let i=0;i<4;i++){degreeButton().onclick({stopPropagation(){stopped++}});
+ const b=degreeButton();states.push([b.text,b.attrs['aria-label']])}
+console.log(JSON.stringify({initial:initial.text,states,saved,stopped,events:Object.keys(initial.events)}));
+""" % fn
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {
+            "initial": "学士", "states": [[d, "初任給の学位：" + d] for d in ["修士", "博士", "最大", "学士"]],
+            "saved": 4, "stopped": 8, "events": ["pointerdown", "pointerup", "keydown", "contextmenu"]})
+
+    def test_shift_switch_is_page_wide_in_toolbar(self):
+        cur = slot(2028, ["A"])
+        prev = slot(2027, ["A"], windows=[window("official", "2027-04-01", opens=["2027-03-01"])])
+        built = bv.build_rows(PROFILES, [{"recruitment_year": 2028, "publishing_company_id": "P",
+                                         "application_slots": [cur, prev]}])
+        shifted_columns = {bv.COLUMNS[i] for r in built[0] for i, c in enumerate(r[:-1]) if len(c) > 5}
+        self.assertEqual(shifted_columns, {"最初の募集開始", "最初の締切"})
+        self.assertTrue(all(bv.header_path(c) == ["日程"] for c in shifted_columns))
+        html = bv.build_html(*built)
+        toolbar = re.search(r'<div class="tools">(.*?)</header>', html, re.S)[1]
+        self.assertIn('id="shift"', toolbar)
+        self.assertIn('id="shift-wrap"', toolbar)
+        self.assertIn('title="前年度の募集枠の行と値を表示"', toolbar)
+        self.assertIn("document.getElementById('shift-wrap').hidden=!view.previous", html)
+        self.assertIn("shx.onchange=()=>setView(()=>{view.shift=shx.checked})", html)
+        self.assertNotIn("shiftToggle", html)
+        self.assertNotIn("header-shift", html)
+        self.assertIn("右パネルも同じ日程", html)
+
+    def test_panel_window_dates_shift_independently(self):
+        html = bv.build_html(*self.built())
+        fn = re.search(r"function windowDate\(w,k\)\{[^\n]+\}", html)[0]
+        script = """
+let shiftOn=false;
+%s
+const w={open:'後日案内',open1:'後日案内',deadline:'27/4/1',deadline1:'28/4/1'};
+const off=['open','deadline'].map(k=>windowDate(w,k));shiftOn=true;
+const on=['open','deadline'].map(k=>windowDate(w,k));
+console.log(JSON.stringify({off,on,onlyDeadline:windowDate({deadline:'27/5/1',deadline1:'28/5/1'},'deadline'),
+ current:windowDate({open:'28/3/1'},'open'),missing:windowDate({},'deadline')}));
+""" % fn
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {
+            "off": [["後日案内", False], ["27/4/1", False]],
+            "on": [["後日案内", False], ["28/4/1", True]],
+            "onlyDeadline": ["28/5/1", True], "current": ["28/3/1", False], "missing": [None, False]})
+        self.assertIn("[['開始','open'],['締切','deadline']]", html)
+        self.assertIn("const [t,on]=windowDate(w,k)", html)
+        self.assertIn("v.append(valNode(c))", html)
+        self.assertIn("v.append(vnode(c))", html)
+
+    def test_official_filter_inherits_window_source(self):
+        w = window("official", "2028-03-01")
+        del w["application_deadline_date"]["records"][0]["source"]
+        self.assertEqual(len(bv.official_records(w)["application_deadline_date"]["records"]), 1)
+        w["source"]["kind"] = "unknown"
+        self.assertEqual(bv.official_records({"records": [w]})["records"], [])
+
+
+class EvidencePopupTest(unittest.TestCase):
+    def built(self, sl=None):
+        return bv.build_rows(PROFILES, [{"recruitment_year": 2028, "publishing_company_id": "P",
+                                        "application_slots": [sl or slot(2027, ["A"], [(307000, "official")])]}])
+
+    def html(self):
+        return bv.build_html(*self.built())
+
+    def node(self, script):
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_salary_evidence_keeps_named_kind_degree_and_breakdown(self):
+        sl = slot(2027, ["A"])
+        sl["starting_salary"] = {"records": [rec({"monthly_total_yen": 307000, "base_salary_yen": 250000,
+                                                 "fixed_overtime_yen": 57000, "fixed_overtime_hours": 20})]}
+        rows, groups, companies = self.built(sl)
+        metadata = groups[0][str(COL["学士初任給"])][0][0][7]
+        self.assertEqual(metadata, {"degree": "学士", "salary_kind": "monthly_total", "monthly_total_yen": 307000,
+                                    "base_salary_yen": 250000, "fixed_overtime_yen": 57000, "fixed_overtime_hours": 20})
+        self.assertEqual(groups[0][str(COL["初任給"])][0][0][7], metadata)
+        self.assertEqual(groups[0][str(COL["学士固定残業代"])][0][0][7], metadata)
+        payload = json.loads(re.search(r'<script id="data" type="application/json">(.*?)</script>',
+                                      bv.build_html(rows, groups, companies), re.S)[1])
+        self.assertEqual(payload["groups"][0][str(COL["学士初任給"])][0][0][7], metadata)
+
+    def test_base_only_and_missing_breakdown_are_not_invented(self):
+        sl = slot(2027, ["A"])
+        sl["starting_salary"] = {"records": [rec({"base_salary_yen": 408500})]}
+        metadata = self.built(sl)[1][0][str(COL["学士初任給"])][0][0][7]
+        self.assertEqual(metadata["salary_kind"], "base_only")
+        self.assertIsNone(metadata["monthly_total_yen"])
+        self.assertIsNone(metadata["fixed_overtime_yen"])
+        self.assertIsNone(metadata["fixed_overtime_hours"])
+        # 企業指標には応募枠の年度や推測した測定年を付けない。
+        candidate = bv.profile_details(PROFILES["A"])[COL["従業員数"]][0][0]
+        self.assertEqual((candidate[1], candidate[7]), (0, {}))
+
+    def test_shifted_date_keeps_sourced_date_and_retrieval(self):
+        w = window("official", "2027-03-15")
+        w["application_deadline_date"]["records"][0]["retrieval"] = {
+            "method": "host_fetch", "fetched_at": "2026-10-11T00:00:00Z"}
+        candidate = self.built(slot(2027, ["A"], windows=[w]))[1][0][str(COL["最初の締切"])][0][0]
+        self.assertEqual(candidate[6], "28/3/15")
+        self.assertIn("27/3/15", candidate[0])
+        self.assertIn("取得 2026-10-11", candidate[0])
+        self.assertEqual(candidate[7], {"sourced_date": "27/3/15", "retrieval": "取得 2026-10-11"})
+        html = self.html()
+        self.assertIn("予想 ", html)
+        self.assertIn("を+1年・未確定", html)
+        self.assertNotIn("li.append(el('span','採用'", html)
+
+    def test_popup_structure_and_slot_remote_removal(self):
+        html = self.html()
+        self.assertIn("p.before(h)", html)  # 固定ヘッダーはスクロール本文の兄弟
+        self.assertIn("#pop .pb{min-height:0;overflow:auto", html)
+        self.assertIn("new ResizeObserver(placePop).observe(pop)", html)
+        self.assertIn("pop.addEventListener('toggle',placePop,true)", html)
+        self.assertIn("document.addEventListener('scroll'", html)
+        self.assertIn("max-height:calc(100dvh - 16px)", html)
+        self.assertIn("['値','対象','種類','出典']", html)
+        self.assertIn("定義 ▸", html)
+        self.assertIn("'メモ'", html)
+        for obsolete in ("function slotPop", "function selectionPop", "function evidenceGrid", "function otherRecords",
+                         "#pop .shown", "#pop .egrid", "sel-evidence", "表示した結果"):
+            self.assertNotIn(obsolete, html)
+        blocks = html.split("function metricBlocks", 1)[1].split("function cellPop", 1)[0]
+        self.assertNotIn("リモート", blocks)
+        self.assertIn("blocks.forEach(b=>renderMetricBlock(p,b))", html)
+        self.assertIn("if(j===5)", html)
+        self.assertIn("record.chosen?'● '", html)
+        self.assertNotIn("リモート", bv.column_descriptions()["応募枠"]["short"])
+        self.assertNotIn("リモート", str(bv.column_descriptions()["応募枠"]["definition"]))
+        self.assertNotIn("remote", self.built()[1][0])
+        self.assertIn("リモート制度", bv.COLUMNS)
+        self.assertIn("売上が一番目に大きい", bv.column_descriptions()["業種1位"]["short"])
+
+    def test_target_words_use_case_year_not_calendar_year(self):
+        fn = re.search(r"function targetOf\(r,y\)\{[^\n]+\}", self.html())[0]
+        result = self.node("const NC=0,r=[{slot:{ry:2028}}];" + fn +
+                           ";console.log(JSON.stringify([0,1,2].map(y=>targetOf(r,y))))")
+        self.assertEqual(result, ["", "2028年卒の枠", "2027年卒の枠（前年度）"])
+
+    def test_selection_focus_is_the_clicked_types_and_empty_title_is_not_used(self):
+        html = self.html()
+        fn = html.split("function selectionTypes", 1)[1].split("function metricBlockData", 1)[0]
+        script = "const D=%s,CI=n=>D.columns.indexOf(n);const r=D.columns.map(()=>['—']);%s;" % (
+            json.dumps({"columns": bv.COLUMNS, "fold": [bv.fold_role(c) for c in bv.COLUMNS]}),
+            "function selectionTypes" + fn)
+        result = self.node(script + "const empty=selectionTypes(r,CI('選考'));r[CI('ケース')]=['○'];r[CI('ES')]=['○'];"
+                           "console.log(JSON.stringify({empty,rare:selectionTypes(r,CI('選考')),es:selectionTypes(r,CI('ES'))}))")
+        self.assertEqual(result, {"empty": [], "rare": ["ケース"], "es": ["ES"]})
+        self.assertIn("popHead(p,selection?'選考':blocks[0].name", html)
+        self.assertNotIn("D.full[i]+'：'+", html)
+        self.assertIn("b.collapsed=focus.length?!focus.includes(n):j>0", html)
+        self.assertIn("names=['工程',...D.columns.filter", html)
+
+    def block_data(self, built, expression, shift=False):
+        html = bv.build_html(*built)
+        payload = json.loads(re.search(r'<script id="data" type="application/json">(.*?)</script>', html, re.S)[1])
+        functions = html.split("const SOURCE_WORDS=", 1)[1].split("function cellPop", 1)[0]
+        cell_detail = html.split("function cellDetail", 1)[1].split("function safeUrl", 1)[0]
+        return self.node("const D=" + json.dumps(payload, ensure_ascii=False) + ";const NC=D.columns.length,r=D.rows[0],"
+                         "CI=n=>D.columns.indexOf(n),unitOf=i=>{const m=/（(.+)）$/.exec(D.full[i]);return m?m[1]:''},"
+                         "view={degree:'学士'},shiftOn=" + str(shift).lower() + ";"
+                         "const sv=c=>shiftOn&&c[5]?c[5]:null,txt=c=>(sv(c)||c)[0];"
+                         "function cellDetail" + cell_detail + "const SOURCE_WORDS=" + functions +
+                         ";console.log(JSON.stringify(" + expression + "))")
+
+    def test_common_block_salary_notes_and_company_target(self):
+        sl = slot(2027, ["A"])
+        sl["starting_salary"] = {"records": [rec({"base_salary_yen": 307000})], "note": "前年の記録"}
+        built = self.built(sl)
+        salary, company = self.block_data(built, "[metricBlocks(r,CI('初任給'))[0],metricBlocks(r,CI('従業員数'))[0]]")
+        self.assertEqual(salary["shown"], "30.7 万円/月")
+        self.assertEqual(salary["target"], "2027年卒の枠（前年度）")
+        self.assertEqual(salary["records"][0]["value"], "30.7 万円/月")
+        self.assertEqual(salary["records"][0]["kind"], "公式")
+        self.assertTrue(salary["records"][0]["chosen"])
+        self.assertIn("基本給のみ", salary["records"][0]["extra"][0])
+        self.assertIn("記載なし", salary["records"][0]["extra"][1])
+        self.assertEqual(salary["notes"], [["2027年卒の枠について", "前年の記録"]])
+        self.assertEqual(company["target"], "")
+        self.assertEqual(company["records"][0]["target"], "")
+        self.assertEqual(company["records"][0]["value"], "100 人")
+
+    def test_common_date_rows_are_sourced_even_when_shown_value_is_prediction(self):
+        w = window("official", "2027-03-15")
+        w["window_name"] = "春募集"
+        w["application_deadline_date"]["records"][0]["retrieval"] = {
+            "method": "host_fetch", "fetched_at": "2026-10-11T00:00:00Z"}
+        built = self.built(slot(2027, ["A"], windows=[w]))
+        block = self.block_data(built, "metricBlocks(r,CI('最初の締切'))[0]", shift=True)
+        self.assertEqual(block["shown"], "予想 28/3/15（27/3/15 を+1年・未確定）")
+        self.assertEqual(block["records"][0]["value"], "27/3/15")
+        self.assertEqual(block["records"][0]["extra"], ["募集回：春募集", "取得 2026-10-11"])
+        later = {"source": {"kind": "official", "url": "u"}, "window_name": "夏募集",
+                 "application_deadline_date": {"announced_later": {
+                     "source": {"kind": "official", "url": "u"},
+                     "retrieval": {"method": "host_fetch", "fetched_at": "2026-10-11T00:00:00Z"}}}}
+        block = self.block_data(self.built(slot(2027, ["A"], windows=[later])),
+                                "metricBlocks(r,CI('最初の締切'))[0]", shift=True)
+        self.assertEqual(block["shown"], "後日案内")
+        self.assertEqual(block["records"][0]["value"], "後日案内")
+        self.assertTrue(block["records"][0]["chosen"])
+
+    def test_selection_blocks_keep_process_records_and_clicked_type_first(self):
+        sl = slot(2027, ["A"])
+        sl["selection_process"] = {
+            "process": {"records": [rec({"stages": [{"steps": [{"label": "ES"}]},
+                                                   {"steps": [{"label": "ケース面接"}]}]})], "note": "工程の補足"},
+            "has_case_interview": {"records": [rec(True), rec(False, "unofficial")], "note": "ケースの補足"}}
+        blocks = self.block_data(self.built(sl), "metricBlocks(r,CI('ケース'))")
+        self.assertEqual(len(blocks), 11)
+        self.assertEqual(blocks[0]["name"], "ケース面接")
+        self.assertFalse(blocks[0]["collapsed"])
+        self.assertEqual(blocks[0]["shown"], "あり")
+        self.assertEqual([r["value"] for r in blocks[0]["records"]], ["あり", "なし"])
+        self.assertTrue(all(b["collapsed"] for b in blocks[1:]))
+        process = next(b for b in blocks if b["name"] == "選考工程")
+        self.assertEqual(process["shown"], "ES → ケース面接")
+        self.assertEqual(process["records"][0]["value"], "ES → ケース面接")
+        self.assertEqual(process["notes"], [["工程 2027年卒の枠について", "工程の補足"]])
+        self.assertEqual(next(b for b in blocks if b["name"] == "ES提出")["shown"], "—（記録なし）")
+
+    def test_shared_renderer_keeps_five_rows_and_collapses_remainder(self):
+        fn = self.html().split("function renderMetricBlock", 1)[1].split("function selectionTypes", 1)[0]
+        result = self.node("""
+class Element {
+ constructor(tag,text,cls){this.tag=tag;this.text=text;this.cls=cls;this.children=[]}
+ append(...xs){this.children.push(...xs)}
+ cloneNode(deep){const e=new Element(this.tag,this.text,this.cls);if(deep)e.children=this.children.map(x=>x.cloneNode(true));return e}
+}
+const el=(tag,text,cls)=>new Element(tag,text,cls),sourceLink=url=>el('a',url);
+function renderMetricBlock%s
+const p=el('div'),record={value:'値',target:'2028年卒の枠',kind:'公式',url:'https://example.org',extra:['基本給 記載なし','固定残業代 記載なし']};
+renderMetricBlock(p,{name:'指標',shown:'値',target:'',records:Array.from({length:8},(_,j)=>({...record,chosen:j===0})),notes:[['対象年度','本文']]});
+const walk=(e,tag)=>[...(e.tag===tag?[e]:[]),...e.children.flatMap(c=>walk(c,tag))];
+const tables=walk(p,'table'),details=walk(p,'details'),chosen=walk(p,'tr').filter(e=>e.cls==='chosen');
+const empty=el('div');renderMetricBlock(empty,{name:'指標',shown:'—（記録なし）',target:'',records:[],notes:[],collapsed:true});
+console.log(JSON.stringify({rows:tables.map(t=>walk(t,'tbody')[0].children.length),headers:tables.map(t=>walk(t,'th').map(x=>x.text)),
+ summary:walk(details[0],'summary')[0].text,chosen:chosen.length,mark:chosen[0].children[0].children[0].text,
+ extra:walk(p,'div').filter(e=>e.cls==='record-extra')[0].text,emptyTag:empty.children[0].tag,emptyValue:walk(empty,'td')[0].text}));
+""" % fn)
+        self.assertEqual(result["rows"], [5, 3])
+        self.assertEqual(result["headers"], [["値", "対象", "種類", "出典"]] * 2)
+        self.assertEqual(result["summary"], "ほか 3件 ▸")
+        self.assertEqual((result["chosen"], result["mark"]), (1, "● 値"))
+        self.assertEqual(result["extra"], "基本給 記載なし・固定残業代 記載なし")
+        self.assertEqual((result["emptyTag"], result["emptyValue"]), ("details", "—（記録なし）"))
+
+    def test_inventory_uses_same_block_with_formal_names_and_assignment_only(self):
+        sl = slot(2027, ["A", "missing-profile"], name="正式なコース")
+        case = {"recruitment_year": 2028, "publishing_company_id": "P", "application_slots": [sl],
+                "application_slot_inventory": {"records": [
+                    {"application_year": 2027, "slot_name": "正式なコース", "source": {"kind": "official", "url": "https://example.org"}},
+                    {"application_year": 2028, "slot_name": "正式なコース", "source": {"kind": "unofficial", "url": "https://other.example"}}],
+                    "note": "収録の理由"}}
+        block = self.block_data(bv.build_rows(PROFILES, [case]), "metricBlocks(r,CI('応募枠'))[0]")
+        self.assertEqual([r["value"] for r in block["records"]], ["正式なコース", "正式なコース"])
+        self.assertEqual([r["chosen"] for r in block["records"]], [True, False])
+        self.assertEqual(block["extra"], "配属先：配属A、missing-profile")
+        self.assertEqual(block["notes"], [["応募枠の収録について", "収録の理由"]])
+        self.assertNotIn("remote", str(block))
+
+    def test_viewport_clamp_content_resize_and_out_of_view_anchor(self):
+        fn = self.html().split("function placePop(){", 1)[1].split("function closePop", 1)[0]
+        result = self.node("""
+let innerWidth=1440,innerHeight=720,closed=0;
+let rect={left:1430,right:1460,top:650,bottom:670};
+const pop={hidden:false,offsetWidth:420,offsetHeight:704,style:{}},
+ popAnchor={isConnected:true,getBoundingClientRect(){return rect},closest(){return null}};
+function matchMedia(){return {matches:false}}function closePop(){closed++;pop.hidden=true}
+function placePop(){%s
+placePop();const first={...pop.style};pop.offsetHeight=350;placePop();const changed={...pop.style};
+rect={left:0,right:40,top:721,bottom:740};placePop();
+console.log(JSON.stringify({first,changed,closed}));
+""" % fn)
+        self.assertEqual(result, {"first": {"left": "1012px", "top": "8px"},
+                                  "changed": {"left": "1012px", "top": "296px"}, "closed": 1})
+
+    def test_requested_pointer_leave_behavior_is_preserved(self):
+        html = self.html()
+        self.assertIn("leaveTimer=setTimeout(closePop,250)", html)
+        self.assertIn("anchor.addEventListener('pointerleave',leaveClose)", html)
+        self.assertIn("pop.addEventListener('pointerleave',leaveClose)", html)
+        self.assertIn("if(e.pointerType==='mouse')cancelLeave()", html)
+        self.assertNotIn("popMode", html)
 
 
 class EncryptionTest(unittest.TestCase):

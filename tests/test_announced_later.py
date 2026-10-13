@@ -1,6 +1,7 @@
 """TBA is sourced application-date evidence, not inferred absence."""
 import base64
 import copy
+import gzip
 import json
 import re
 import tempfile
@@ -188,7 +189,7 @@ class AnnouncedLaterViewerTests(unittest.TestCase):
         enc = extract(bv.build_html(rows, groups, companies, password="test-only"))
         key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=base64.b64decode(enc["salt"]),
                          iterations=enc["iterations"]).derive(b"test-only")
-        decrypted = json.loads(AESGCM(key).decrypt(base64.b64decode(enc["iv"]), base64.b64decode(enc["ct"]), None))
+        decrypted = json.loads(gzip.decompress(AESGCM(key).decrypt(base64.b64decode(enc["iv"]), base64.b64decode(enc["ct"]), None)))
         for data in (plain, decrypted):
             self.assertEqual(data["rows"][0][bv.COL_INDEX["最初の募集開始"]][0], "後日案内")
             candidates = data["groups"][0][str(bv.COL_INDEX["最初の募集開始"])][0]

@@ -1135,6 +1135,40 @@ console.log(JSON.stringify({first,changed,closed}));
         self.assertEqual(result, {"first": {"left": "1012px", "top": "8px"},
                                   "changed": {"left": "1012px", "top": "296px"}, "closed": 1})
 
+    def test_row_cache_reuses_nodes_and_preserves_selection_column(self):
+        html = self.html()
+        select = html.split("function selectRow(tr){", 1)[1].split("const hd=", 1)[0]
+        render = html.split("function render(){", 1)[1].split("function buildRow", 1)[0]
+        result = self.node(r"""
+const NC=2,a=[["A",2],["a",0],{slot:{prev:false}}],b=[["B",1],["b",0],{slot:{prev:false}}];
+a.hay='a';b.hay='b';const D={rows:[a,b],built_at:'test'},view={previous:true};
+let selected=a,selCol=1,selTd=null,selTr=null,sortCol=-1,sortDir=1,query='',builds=0;
+const rowCache=new Map(),info={},tb={replaceChildren(f){this.rows=f.rows}},
+ document={createDocumentFragment(){return {rows:[],appendChild(tr){this.rows.push(tr)}}}};
+function closePop(){}function applyFold(){}function renderPanel(){}function narrow(){return false}
+function key(c){return c[1]}function cmp(a,b){return a-b}
+function buildRow(r){builds++;return {r,cells:[0,1].map(()=>({classList:{values:new Set(),
+ add(v){this.values.add(v)},remove(v){this.values.delete(v)}}})),removeAttribute(){delete this.className}}}
+function selectRow(tr){%s
+function render(){%s
+render();const first=tb.rows[0];sortCol=0;render();const reused=tb.rows[1]===first;
+query='b';render();const moved=selected===b&&selTd===tb.rows[0].cells[1]&&!first.cells[1].classList.values.has('selc');
+query='';render();selCol=-1;selectRow(first);const noCell=selTd===null;
+console.log(JSON.stringify({builds,reused,moved,noCell,oldRowUnselected:!tb.rows[0].className}));
+""" % (select, render))
+        self.assertEqual(result, {"builds": 2, "reused": True, "moved": True,
+                                  "noCell": True, "oldRowUnselected": True})
+
+    def test_cell_click_avoids_render_and_content_changes_invalidate_cache(self):
+        html = self.html()
+        handler = html.split("tr.onclick=e=>", 1)[1].split("r.slice(0,NC)", 1)[0]
+        self.assertNotIn("render();", handler)
+        self.assertIn("closePop();", handler)
+        self.assertIn("selectRow(tr);renderPanel();", handler)
+        for begin, end in [("function setFold", "function tg"),
+                           ("function displayRows", "function setView")]:
+            self.assertIn("rowCache.clear()", html.split(begin, 1)[1].split(end, 1)[0])
+
     def test_requested_pointer_leave_behavior_is_preserved(self):
         html = self.html()
         self.assertIn("leaveTimer=setTimeout(closePop,250)", html)
@@ -1145,7 +1179,7 @@ console.log(JSON.stringify({first,changed,closed}));
 
 
 class EncryptionTest(unittest.TestCase):
-    PASSWORD = "testpass"
+    PASSWORD = "dummy-pass-123"
 
     def built(self):
         sl = slot(2028, ["A"], [(300000, "official")], name="秘密の応募枠")
@@ -1173,12 +1207,23 @@ class EncryptionTest(unittest.TestCase):
         self.assertEqual((len(salt), len(iv)), (16, 12))
         key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=e["iterations"]).derive(
             self.PASSWORD.encode())
-        data = json.loads(AESGCM(key).decrypt(iv, ct, None).decode("utf-8"))
+        import gzip
+        self.assertEqual((e["v"], e["zip"]), (2, "gzip"))
+        compressed = AESGCM(key).decrypt(iv, ct, None)
+        self.assertTrue(compressed.startswith(b"\x1f\x8b"))
+        plaintext = gzip.decompress(compressed)
+        self.assertLess(len(ct), len(plaintext) // 4)
+        data = json.loads(plaintext.decode("utf-8"))
         # 暗号化版の中身は平文版と同一（built_at を除く）。平文版を先に作っても暗号化版が崩れないこと。
         plain = self.payload(bv.build_html(rows, groups, companies))
         self.assertEqual({k: v for k, v in data.items() if k != "built_at"},
                          {k: v for k, v in plain.items() if k != "built_at"})
         self.assertEqual(data["columns"], bv.COLUMNS)
+
+    def test_unsupported_decompression_has_specific_message(self):
+        html = self.built()[3]
+        self.assertIn("if(!window.DecompressionStream)", html)
+        self.assertIn("gzip 展開に対応したブラウザー", html)
 
     def test_wrong_passphrase_fails(self):
         from cryptography.exceptions import InvalidTag

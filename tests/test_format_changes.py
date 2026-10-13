@@ -2,6 +2,7 @@
 
 import base64
 import contextlib
+import gzip
 import io
 import shutil
 import json
@@ -159,7 +160,7 @@ class ViewerSkipTests(unittest.TestCase):
             e = json.loads(out.read_text(encoding="utf-8").split('id="data" type="application/json">')[1].split("</script>")[0])
             b = base64.b64decode
             key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=b(e["salt"]), iterations=e["iterations"]).derive(b"pw")
-            self.assertEqual(json.loads(AESGCM(key).decrypt(b(e["iv"]), b(e["ct"]), None))["skipped"], 1)
+            self.assertEqual(json.loads(gzip.decompress(AESGCM(key).decrypt(b(e["iv"]), b(e["ct"]), None)))["skipped"], 1)
             self.assertEqual(json.loads(plain.read_text(encoding="utf-8").split('id="data" type="application/json">')[1].split("</script>")[0])["skipped"], 1)
 
 

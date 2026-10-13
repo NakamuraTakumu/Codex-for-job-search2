@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import json
 import os
 import re
@@ -839,14 +840,14 @@ def header_path(col) -> list:
 
 
 def encrypt_payload(plaintext: bytes, password: str) -> dict:
-    """PBKDF2-HMAC-SHA256 で鍵を導出し AES-256-GCM で暗号化する。"""
+    """UTF-8 JSON を gzip 圧縮し、PBKDF2-HMAC-SHA256 → AES-256-GCM で暗号化する。"""
     if not password:
         raise ValueError(f"{PASSWORD_ENV} is required.")
     salt, iv = os.urandom(16), os.urandom(12)
     key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=ITERATIONS).derive(password.encode("utf-8"))
-    ct = AESGCM(key).encrypt(iv, plaintext, None)
+    ct = AESGCM(key).encrypt(iv, gzip.compress(plaintext, compresslevel=9, mtime=0), None)
     b64 = lambda b: base64.b64encode(b).decode("ascii")
-    return {"v": 1, "alg": "AES-256-GCM", "kdf": "PBKDF2", "hash": "SHA-256",
+    return {"v": 2, "zip": "gzip", "alg": "AES-256-GCM", "kdf": "PBKDF2", "hash": "SHA-256",
             "iterations": ITERATIONS, "salt": b64(salt), "iv": b64(iv), "ct": b64(ct)}
 
 
@@ -1006,14 +1007,14 @@ LOCK_HTML = r"""<div id="lock"><form id="lockform" autocomplete="off"><h1>企業
 <div id="lockerr" role="alert"></div><button type="submit" id="lockbtn">開く</button></form></div>
 """
 
-DECRYPT_JS = r"""// --- 復号：PBKDF2-HMAC-SHA256 → AES-256-GCM（既存の暗号化ビューアと互換）。導出した鍵のバイト列だけを sessionStorage に保持する ---
+DECRYPT_JS = r"""// --- 復号：PBKDF2-HMAC-SHA256 → AES-256-GCM → gzip 展開。導出した鍵のバイト列だけを sessionStorage に保持する ---
 const E=JSON.parse(document.getElementById('data').textContent);
 const SK='viewerKey',b2u=v=>Uint8Array.from(atob(v),c=>c.charCodeAt(0));
 const u2b=u=>btoa(String.fromCharCode(...u));
 async function decryptWith(keyBytes){
  const k=await crypto.subtle.importKey('raw',keyBytes,'AES-GCM',false,['decrypt']);
  const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:b2u(E.iv)},k,b2u(E.ct));
- return JSON.parse(new TextDecoder().decode(pt))}
+ return JSON.parse(await new Response(new Blob([pt]).stream().pipeThrough(new DecompressionStream('gzip'))).text())}
 async function deriveBytes(pw){
  const m=await crypto.subtle.importKey('raw',new TextEncoder().encode(pw),'PBKDF2',false,['deriveBits']);
  return new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt:b2u(E.salt),iterations:Number(E.iterations),hash:E.hash},m,256))}
@@ -1021,6 +1022,7 @@ function show(D){document.getElementById('lock').hidden=true;document.getElement
 (async()=>{
  const lock=document.getElementById('lock'),form=document.getElementById('lockform'),pw=document.getElementById('pw'),err=document.getElementById('lockerr'),btn=document.getElementById('lockbtn');
  if(!(window.crypto&&crypto.subtle)){err.textContent='復号には HTTPS またはローカルHTTPサーバー（localhost）が必要です。';btn.disabled=true;return}
+ if(!window.DecompressionStream){err.textContent='復号には gzip 展開に対応したブラウザー（DecompressionStream）が必要です。';btn.disabled=true;return}
  try{const s=sessionStorage.getItem(SK);if(s){try{show(await decryptWith(b2u(s)));return}catch(e){sessionStorage.removeItem(SK)}}}catch(e){}
  form.addEventListener('submit',async ev=>{
   ev.preventDefault();err.textContent='';btn.disabled=true;
@@ -1213,6 +1215,12 @@ __LOCK_HTML__
 function start(D){
 const numeric=new Set(D.numeric),NC=D.columns.length;
 let selected=null,selCol=-1,selTd=null,sortCol=-1,sortDir=1,query='';
+// 行の内容は表示区分・折りたたみの変更時だけ変わる。選択は内容と別に更新する。
+const rowCache=new Map();let selTr=null;
+function selectRow(tr){
+ if(selTr)selTr.removeAttribute('class');if(selTd)selTd.classList.remove('selc');
+ selTr=tr;selTd=tr&&selCol>=0?tr.cells[selCol]:null;
+ if(selTr)selTr.className='sel';if(selTd)selTd.classList.add('selc')}
 const hd=document.getElementById('hd'),tb=document.getElementById('tb'),info=document.getElementById('info'),pop=document.getElementById('pop');
 const narrow=()=>matchMedia('(max-width:800px)').matches;
 function el(t,txt,cls){const e=document.createElement(t);if(txt!==undefined)e.textContent=txt;if(cls)e.className=cls;return e}
@@ -1226,7 +1234,7 @@ try{const s=JSON.parse(localStorage.getItem(FK));if(s&&typeof s.e==='boolean'&&A
 const DEGREE_NAMES=['学士','修士','博士'];
 const foldStyle=document.head.appendChild(document.createElement('style')),subTg={};
 const shown=i=>{const [r,k]=D.fold[i];return r==='max'?!fold.e:r==='deg'?fold.e&&!fold.d[k]:r==='sub'?fold.e&&fold.d[k]:r==='smax'?!fold.s:r==='ssub'?fold.s:r==='imax'?!fold.i:r==='isub'?fold.i:true};
-function setFold(f){f();try{localStorage.setItem(FK,JSON.stringify(fold))}catch(e){}
+function setFold(f){f();rowCache.clear();try{localStorage.setItem(FK,JSON.stringify(fold))}catch(e){}
  if(sortCol>=0&&!shown(sortCol))sortCol=-1;render()}
 function tg(txt,title,f){const t=el('button',txt,'tg');t.type='button';t.title=title;t.setAttribute('aria-expanded',txt==='▾'?'true':'false');t.onclick=e=>{e.stopPropagation();setFold(f)};return t}
 function degreeButton(){const b=el('button',view.degree,'salary-degree');b.type='button';b.setAttribute('aria-label','初任給の学位：'+view.degree);
@@ -1285,6 +1293,7 @@ try{const s=JSON.parse(localStorage.getItem(VK));if(s){for(const k of ['previous
 const shx=document.getElementById('shift'),prx=document.getElementById('previous'),unx=document.getElementById('unofficial');
 const original={rows:D.rows,groups:D.groups,companies:D.companies};
 function displayRows(){
+ rowCache.clear();
  const idx=selected?D.rows.indexOf(selected):-1,mode=Number(view.previous)+''+Number(view.unofficial),v=(D.variants||{})[mode]||{};
  D.rows=original.rows.map((r,i)=>Object.assign([...r],(v.rows||{})[i]||{}));
  D.groups=original.groups.map((g,i)=>Object.assign({},g,(v.groups||{})[i]||{}));
@@ -1318,15 +1327,20 @@ function render(){
   k.sort((x,y)=>{if(x[1]===null||y[1]===null)return cmp(x[1],y[1]);return sortDir*cmp(x[1],y[1])});rows=k.map(x=>x[0])}
  if(selected&&!rows.includes(selected))selected=null;
  if(!narrow()&&rows.length&&!selected)selected=rows[0];
- const f=document.createDocumentFragment();selTd=null;
- rows.forEach(r=>{const tr=document.createElement('tr');if(r===selected)tr.className='sel';
-  tr.onclick=e=>{const td=e.target.closest('td');selected=r;selCol=td?td.cellIndex:-1;render();
+ const f=document.createDocumentFragment();
+ rows.forEach(r=>{let tr=rowCache.get(r);if(!tr){tr=buildRow(r);rowCache.set(r,tr)}f.appendChild(tr)});
+ tb.replaceChildren(f);selectRow(selected?rowCache.get(selected):null);
+ renderPanel();
+ info.textContent=`${rows.length} / ${available.length} 行　生成: ${D.built_at}${D.skipped?`　（旧形式等で ${D.skipped} 件を除外）`:''}`;
+}
+function buildRow(r){
+ const tr=document.createElement('tr');
+ tr.onclick=e=>{const td=e.target.closest('td');closePop();selected=r;selCol=td?td.cellIndex:-1;selectRow(tr);renderPanel();
    document.getElementById('panel').scrollTop=0;
    if(selTd&&cellDetail(r,selCol))openPop(selTd,cellPop(r,selCol));
    else if(narrow())document.getElementById('panel').scrollIntoView({behavior:'smooth',block:'start'})};
-  r.slice(0,NC).forEach((c,i)=>{const td=document.createElement('td');const on=r===selected&&i===selCol;
-   td.className='c'+i+(startCols.has(i)?' gs':'')+(D.columns[i]==='採用元'?' pubc':'')+(on?' selc':'')+(numeric.has(D.columns[i])?' num':'')+(c[0]==='—'?' na':'')+((c[2]||'').includes('前')?' pv':'');
-   if(on)selTd=td;
+  r.slice(0,NC).forEach((c,i)=>{const td=document.createElement('td');
+   td.className='c'+i+(startCols.has(i)?' gs':'')+(D.columns[i]==='採用元'?' pubc':'')+(numeric.has(D.columns[i])?' num':'')+(c[0]==='—'?' na':'')+((c[2]||'').includes('前')?' pv':'');
    const dj=dittoSrc(r,i);
    if(dj>=0){td.classList.remove('pv');td.classList.add('dit');td.append(el('span','〃','dit'));
     const words=[...(c[2]||'')].map(m=>MK[m][1]).join('・');
@@ -1335,10 +1349,8 @@ function render(){
    const mk=c[2]||'',vn=vnode(c);
    if(mk){const w=el('span',undefined,['mk',...[...mk].map(m=>MK[m][0])].join(' '));w.append(vn);td.append(w)}else td.append(vn);
    const words=[...mk].map(m=>MK[m][1]).join('・'),base=(i<2||c[3])?(c[3]||txt(c)):'';
-   if(base||words)td.title=[base,words].filter(Boolean).join('\n');tr.appendChild(td)});f.appendChild(tr)});
- tb.replaceChildren(f);
- renderPanel();
- info.textContent=`${rows.length} / ${available.length} 行　生成: ${D.built_at}${D.skipped?`　（旧形式等で ${D.skipped} 件を除外）`:''}`;
+   if(base||words)td.title=[base,words].filter(Boolean).join('\n');tr.appendChild(td)});
+ return tr;
 }
 function cellDetail(r,i){const d=r[NC];if(i===1)return d.slot;
  if(D.columns[i]==='初任給'&&view.degree!=='最大')i=CI(view.degree+'初任給');

@@ -180,7 +180,7 @@ REPORT_ACCESS_PASSWORD='合言葉' python3 scripts/build_viewer.py
 1回のビルドで同じデータから2種類の HTML を出力します。
 
 - `--plain-output`（標準 `tmp/viewer/index.html`）: 暗号化なしでデータを埋め込んだローカル確認用。合言葉の入力なしですぐ開き、`python3 -m http.server` などの通常の HTTP で見られます。毎回生成します。`tmp/` は `.gitignore` 済みで、平文はここにだけ置きます。
-- `--output`（標準 `site/index.html`）: 公開用の暗号化版（PBKDF2-HMAC-SHA256 → AES-256-GCM）。環境変数 `REPORT_ACCESS_PASSWORD` が設定されていて空でないときだけ生成します。未設定なら標準エラー出力に通知を出し、平文のみ生成して終了コード 0 で終わります。
+- `--output`（標準 `site/index.html`）: 公開用の暗号化版（データを gzip 圧縮したうえで、PBKDF2-HMAC-SHA256 で導いた鍵により AES-256-GCM で暗号化）。開くブラウザーは gzip 展開（`DecompressionStream`）に対応している必要があります（Chrome 80 以降、Firefox 113 以降、Safari 16.4 以降）。環境変数 `REPORT_ACCESS_PASSWORD` が設定されていて空でないときだけ生成します。未設定なら標準エラー出力に通知を出し、平文のみ生成して終了コード 0 で終わります。
 
 平文の出力先が git の管理外（`git check-ignore` で ignore 済み）でない場合、またはリポジトリ外の場合は、何も書き込まずエラー（終了コード 1）で終了します。平文データの誤コミットを防ぐためで、回避用のオプションはありません。
 

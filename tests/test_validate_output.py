@@ -6,6 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from schemas.company_profile_models import CompanyProfile, IndustryClassificationCode
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "jobs" / "company_profile_fill" / "validate_output.py"
@@ -49,7 +53,9 @@ class ValidateOutputTests(unittest.TestCase):
                 "research_and_development_expenses_yen": self._missing_metric(),
                 "research_output_publication_presence": self._missing_metric(),
                 "industry_academia_collaboration_presence": self._missing_metric(),
-                "industry_classification_codes": self._missing_metric(),
+                "industry_classification_codes": self._found_metric(
+                    ["G_information_communications"]
+                ),
             },
         }
 
@@ -169,6 +175,53 @@ class ValidateOutputTests(unittest.TestCase):
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("field-level searched_sources is not allowed", proc.stderr)
+
+    def test_industry_codes_with_five_codes_pass_schema(self):
+        codes = [code.value for code in list(IndustryClassificationCode)[:5]]
+        payload = self._base_payload()
+        payload["basic_information"]["industry_classification_codes"] = self._found_metric(codes)
+
+        profile = CompanyProfile.model_validate(payload)
+
+        self.assertEqual(len(profile.basic_information.industry_classification_codes.records[0].value), 5)
+
+    def test_industry_codes_with_six_codes_fail_schema(self):
+        codes = [code.value for code in list(IndustryClassificationCode)[:6]]
+        payload = self._base_payload()
+        payload["basic_information"]["industry_classification_codes"] = self._found_metric(codes)
+
+        with self.assertRaises(ValidationError) as ctx:
+            CompanyProfile.model_validate(payload)
+
+        self.assertIn("industry_classification_codes must have 1 to 5 codes", str(ctx.exception))
+
+    def test_industry_one_record_passes_output_validation(self):
+        payload = self._base_payload()
+
+        proc = self._run_validator(payload)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_industry_zero_records_fail_output_validation(self):
+        payload = self._base_payload()
+        payload["basic_information"]["industry_classification_codes"] = self._missing_metric()
+
+        proc = self._run_validator(payload)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("exactly one record", proc.stderr)
+
+    def test_industry_two_records_fail_output_validation(self):
+        payload = self._base_payload()
+        record = self._found_metric(["G_information_communications"])["records"][0]
+        payload["basic_information"]["industry_classification_codes"] = {
+            "records": [record, dict(record)]
+        }
+
+        proc = self._run_validator(payload)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("exactly one record", proc.stderr)
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,6 +50,16 @@ def validate_company_profile_output(
             f"expected {expected_legal_name!r}, got {company_profile.legal_name!r}"
         )
 
+    # 業種は判定結果なので record は常に1件（空や複数の record を新しい出力で作らせない）。
+    # 既存データの再調査が済んだら CompanyProfile の validator へ移し、ここからは外す。
+    industry_records = company_profile.basic_information.industry_classification_codes.records
+    if len(industry_records) != 1:
+        raise ValueError(
+            "industry_classification_codes must have exactly one record "
+            f"(got {len(industry_records)}): merge the judgment into one record, "
+            "and use T_unclassifiable when the business cannot be confirmed"
+        )
+
 
 def main(argv: list[str]) -> int:
     if len(argv) != 3:

@@ -126,21 +126,26 @@ class BasicInformation(SchemaModel):
     )
     industry_classification_codes: SourcedMetric[list[IndustryClassificationCode]] = Field(
         description=(
-            "企業の事業領域を、日本標準産業分類の大分類に対応するコードの順序付き一覧"
-            "（1〜3個、重複なし）で記録する。有価証券報告書、統合報告書、会社概要などで"
-            "事業セグメント（なければ事業内容）とその売上高を確認し、各セグメントの事業内容を"
-            "大分類の定義に当てはめ、同じ大分類のセグメントは合算して売上高の大きい順に最大3つ"
-            "並べる。sourceが大分類そのものを示している必要はない。対応づけの根拠（セグメント名、"
-            "売上高、当てはめた大分類）をnoteに書く。規模の順序を判断できない場合は、主要事業として"
-            "確認できた1つだけを記録する。持株会社など対象法人自体が事業を営まない場合は、"
-            "グループの連結セグメントで判定し、そのことをnoteに書く。"
+            "対象法人が営む事業を、日本標準産業分類の大分類のコードで記録する（1〜5個、重複なし）。"
+            "有価証券報告書、統合報告書、会社概要などで事業セグメント（なければ事業内容）を確認し、"
+            "各事業を大分類の定義に当てはめる。複数の事業を含むセグメントは主な事業で当てはめる。"
+            "sourceが大分類そのものを示している必要はない。"
+            "確認できた大分類はすべて記録し、同じ大分類の事業は合算する。"
+            "売上高が分かる大分類は売上高の大きい順に並べ、売上高が分からない大分類はその後に"
+            "主要なものから並べる。"
+            "外資の日本法人などは、その法人自身の事業で判定する。持株会社など対象法人自体が"
+            "事業を営まない場合だけ、グループの連結セグメントで判定する。"
+            "この指標は判定結果なので、sourceの種類にかかわらずrecordは1件にまとめ、根拠"
+            "（セグメント名や事業内容、売上高、当てはめた大分類、使ったsource）をnoteに書く。"
+            "事業内容を確認できない場合は、確認に使ったsourceで T_unclassifiable を記録する。"
         ),
         json_schema_extra={
             "x-do_not": (
-                "採用職種、研究テーマ、部署名、製品カテゴリだけから推測して分類しない。"
-                "規模のデータで裏づけられない順序で並べない。"
-                "大分類を直接示すsourceがないことを理由にMissingにしない。"
-                "事業内容そのものを確認できない場合だけMissingにする。"
+                "採用職種、研究テーマ、部署名、製品カテゴリだけから分類しない。"
+                "第三者サイトの業種表示だけで決めない。"
+                "売上高や順序が分からないことを理由に、確認できた大分類を省かない。"
+                "持株会社以外で、親会社やグループの事業で対象法人の事業を置き換えない。"
+                "Missingにしない。"
             )
         },
     )
@@ -150,8 +155,8 @@ class BasicInformation(SchemaModel):
     def validate_industry_codes(cls, metric):
         for record in metric.records:
             codes = record.value
-            if not 1 <= len(codes) <= 3:
-                raise ValueError("industry_classification_codes must have 1 to 3 codes")
+            if not 1 <= len(codes) <= 5:
+                raise ValueError("industry_classification_codes must have 1 to 5 codes")
             if len(set(codes)) != len(codes):
                 raise ValueError("industry_classification_codes must not contain duplicates")
         return metric

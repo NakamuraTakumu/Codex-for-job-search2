@@ -649,7 +649,72 @@ def build_rows(profiles: dict[str, dict], cases: list[dict]):
     for previous, unofficial in ((False, False), (False, True), (True, False)):
         ps, cs = (profiles, cases) if unofficial else (official_records(profiles), official_records(cases))
         rows.variants[f"{int(previous)}{int(unofficial)}"] = _build_rows(ps, cs, previous)
-    return rows, groups, companies
+    return merge_identical_rows(rows, groups, companies)
+
+
+# 名前の列（応募枠・採用元・配属先）の連結名の規則。統合行は name_list_cell、会社行は JS の nameList が、payload の name_list を通して同じ値を使う。
+# 単位 {unit} だけが列ごとに違う（枠・社）。
+NAME_LIST = {"sep": "／", "limit": 3, "more": "{first} ほか{n}{unit}"}
+
+
+def name_list_cell(items, unit, sort, marks="") -> list:
+    """名前を連結したセル。items: [(表示名, 正式名)]。3つまで「／」でつなぎ、4つ以上は「先頭 ほかN<unit>」。ツールチップは全部の名前。"""
+    shorts = [s for s, _ in items]
+    label = (NAME_LIST["sep"].join(shorts) if len(shorts) <= NAME_LIST["limit"]
+             else NAME_LIST["more"].format(first=shorts[0], n=len(shorts) - 1, unit=unit))
+    tip = "\n".join(f if s == f else f"{s}（{f}）" for s, f in items)
+    return cell(label, sort, marks, tip)
+
+
+def merge_identical_rows(rows, groups, companies):
+    """全表示区分で、応募枠以外のセル・根拠・右パネルが同じ行だけをビルド時に統合する。
+
+    group の添字自体は枠ごとに異なるので、参照先の内容で比較する。年度は根拠の対象年度や
+    前年度オフの意味を決めるため、同じ配属先・募集年度の中だけで比較する。
+    """
+    datasets = [(rows, groups, companies), *getattr(rows, "variants", {}).values()]
+    slot_col = COL_INDEX["応募枠"]
+
+    def signature(rs, gs, cs, index):
+        r = rs[index]
+        d = r[-1]
+        gd, cd = gs[d["g"]], cs.get(d["p"], {})
+        cells = [[c, gd.get(str(i)) or cd.get(str(i))]
+                 for i, c in enumerate(r[:-1]) if i != slot_col]
+        panel = {k: v for k, v in d.items() if k not in ("g", "slot", "title")}
+        return [d["p"], d["slot"]["ry"], d["title"][:1], cells, panel]
+
+    buckets = {}
+    for i in range(len(rows)):
+        key = json.dumps([signature(*dataset, i) for dataset in datasets],
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        buckets.setdefault(key, []).append(i)
+    members = list(buckets.values())  # 最初のメンバーの位置・枠の元の順序を保つ
+    group_ids = list(dict.fromkeys(rows[ids[0]][-1]["g"] for ids in members))
+    group_index = {g: i for i, g in enumerate(group_ids)}
+
+    def merge(dataset, previous=True):
+        rs, gs, cs = dataset
+        merged = ViewerRows()
+        for ids in members:
+            r = copy.deepcopy(rs[ids[0]])
+            d = r[-1]
+            d["g"] = group_index[d["g"]]
+            if len(ids) > 1:
+                # 元の枠セルも保存する。正式名・短名・印・ソートキーをすべて復元できる。
+                d["slots"] = [{**copy.deepcopy(rs[i][-1]["slot"]), "cell": copy.deepcopy(rs[i][slot_col])}
+                              for i in ids]
+                visible = [s for s in d["slots"] if previous or not s["prev"]] or d["slots"]
+                r[slot_col] = name_list_cell([(s["cell"][0], s["name"]) for s in visible], "枠", r[slot_col][1],
+                                             "前" if all(s["prev"] for s in visible) else "")
+                d["title"] = [d["title"][0], *[s["name"] for s in visible]]
+            merged.append(r)
+        return merged, [gs[g] for g in group_ids], cs
+
+    merged, groups, companies = merge(datasets[0])
+    merged.variants = {mode: merge(dataset, previous=mode[0] == "1")
+                       for mode, dataset in getattr(rows, "variants", {}).items()}
+    return merged, groups, companies
 
 
 def _build_rows(profiles: dict[str, dict], cases: list[dict], previous=True):
@@ -733,9 +798,9 @@ def column_descriptions() -> dict[str, dict]:
     slot, win, part = ApplicationSlot.model_fields, ApplicationWindow.model_fields, StartingSalary.model_fields
     sel = SelectionProcess.model_fields
     short = {
-        "配属先": "入社後に配属される企業。右側の企業情報はこの企業のもの。配属先が複数ある枠は配属先ごとに1行。",
+        "配属先": "入社後に配属される企業。右側はこの企業の情報。値・根拠が同じ枠は1行にまとめ、クリックで展開（+N）・収納（−）。",
         "採用元": "募集を出している企業（応募窓口）。",
-        "応募枠": "応募のコース・職種。クリックで正式名称・配属先・記録・出典を表示。",
+        "応募枠": "応募のコース・職種。同じ値・根拠の枠は連結（4枠以上は「ほかN枠」）。クリックで全枠名・配属先・出典を表示。",
         "最初の募集開始": "全募集回のうち最も早い応募開始日。",
         "最初の締切": "全募集回のうち最も早い締切日。",
         "初任給": "見出しで選んだ学位の月給（初期値は学士）。最大は学位別の最高額で左に学位。▸ で学位別に展開。",
@@ -931,7 +996,7 @@ def build_html(rows: list[list], groups: list[dict], companies: dict[str, dict],
         "rows": rows,
         "fold": [fold_role(c) for c in COLUMNS], "hpath": [header_path(c) for c in COLUMNS],
         "groups": groups, "companies": companies, "variants": changes,
-        "skipped": skipped,
+        "skipped": skipped, "name_list": NAME_LIST,
         "built_at": datetime.now(jst).strftime("%Y-%m-%d %H:%M JST"),
     }
     plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1043,8 +1108,8 @@ TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>企業調査一覧</title>
 <style>
-:root{--bg:#f7f8fa;--surface:#fff;--fg:#1f2933;--mut:#667085;--line:#e4e8ee;--line2:#c9d1db;--head:#eef2f6;--hover:#f3f7fa;--hl:#1f6f5b;--hlfg:#fff;--soft:#e4f3ee;--soft-line:#b7ded4;--link:#155eef;--warn:#9a3412;--warn-bg:#fff3e8;--warn-line:#fed7aa;--sel:#e4f3ee;--prev-fg:#0369a1;--badge:#eef2f6;--badgefg:#475467;--card:0 1px 2px rgba(16,24,40,.05);--shadow:0 10px 30px rgba(16,24,40,.16),0 1px 3px rgba(16,24,40,.08)}
-@media (prefers-color-scheme:dark){:root{--bg:#101317;--surface:#181c21;--fg:#e6e9ed;--mut:#98a2b3;--line:#262c34;--line2:#39414c;--head:#1f242b;--hover:#1e242b;--hl:#5fc2a5;--hlfg:#0f1a16;--soft:#1b3a31;--soft-line:#2a5a4b;--link:#8ab4ff;--warn:#fdba74;--warn-bg:#3a2a1c;--warn-line:#6b4423;--sel:#1b3a31;--prev-fg:#7dd3fc;--badge:#262c34;--badgefg:#b6bfcb;--card:none;--shadow:0 10px 30px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.4)}}
+:root{--bg:#f7f8fa;--surface:#fff;--fg:#1f2933;--mut:#667085;--line:#e4e8ee;--line2:#c9d1db;--head:#eef2f6;--hover:#f3f7fa;--hovertint:rgba(0,85,149,.047);--hl:#1f6f5b;--hlfg:#fff;--soft:#e4f3ee;--soft-line:#b7ded4;--link:#155eef;--warn:#9a3412;--warn-bg:#fff3e8;--warn-line:#fed7aa;--sel:#e4f3ee;--prev-fg:#0369a1;--badge:#eef2f6;--badgefg:#475467;--card:0 1px 2px rgba(16,24,40,.05);--shadow:0 10px 30px rgba(16,24,40,.16),0 1px 3px rgba(16,24,40,.08)}
+@media (prefers-color-scheme:dark){:root{--bg:#101317;--surface:#181c21;--fg:#e6e9ed;--mut:#98a2b3;--line:#262c34;--line2:#39414c;--head:#1f242b;--hover:#1e242b;--hovertint:rgba(124,161,200,.06);--hl:#5fc2a5;--hlfg:#0f1a16;--soft:#1b3a31;--soft-line:#2a5a4b;--link:#8ab4ff;--warn:#fdba74;--warn-bg:#3a2a1c;--warn-line:#6b4423;--sel:#1b3a31;--prev-fg:#7dd3fc;--badge:#262c34;--badgefg:#b6bfcb;--card:none;--shadow:0 10px 30px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.4)}}
 *{box-sizing:border-box}
 __LOCK_CSS__
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Sans","Noto Sans JP",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
@@ -1081,9 +1146,9 @@ details.legend summary::-webkit-details-marker{display:none}
 details.legend summary .more{margin-left:auto;color:var(--link)}
 details.legend summary .more::before{content:"▸ "}details.legend[open] summary .more::before{content:"▾ "}
 details.legend .help{margin:8px 0 2px;padding-top:8px;border-top:1px solid var(--line);line-height:1.8;max-width:1100px;color:var(--mut);font-size:12.5px}
-:root{--name-w:150px}
+:root{--name-w:150px;--ct-w:36px}
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 400px;grid-template-rows:minmax(0,1fr);gap:16px;flex:1;min-height:0}
-.wrap{overflow:auto;min-height:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--card)}
+.wrap{position:relative;overflow:auto;min-height:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--card)}
 #panel{box-sizing:border-box;min-height:0;overflow:auto;padding:18px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--card);overflow-wrap:anywhere}
 #panel h2{font-size:20px;line-height:1.3;margin:0}
 #panel .psub{margin-top:3px;color:var(--mut);font-size:13px}
@@ -1148,7 +1213,8 @@ tr.sel td.selc{outline:2px solid var(--hl);outline-offset:-2px}
 table{border-collapse:separate;border-spacing:0;white-space:nowrap;font-size:13.5px}
 th,td{padding:7px 12px;border-bottom:1px solid var(--line);background:var(--surface);text-align:left}
 tbody tr{cursor:pointer}
-tbody tr:hover td{background:var(--hover)}
+/* 行のホバーは :hover で背景を変えず、#hv の帯を動かす（ポインターの下を行が通るたびに表を描き直さないため） */
+#hv{position:absolute;left:0;top:0;z-index:1;pointer-events:none;background:var(--hovertint);will-change:transform}#hv[hidden]{display:none}
 tbody tr:last-child td{border-bottom:0}
 th{position:sticky;top:0;z-index:2;background:var(--head);cursor:pointer;user-select:none;color:var(--fg);font-size:12.5px;font-weight:650;padding:9px 12px;border-bottom:1px solid var(--line2)}
 th:hover{color:var(--hl)}
@@ -1169,9 +1235,9 @@ th.num{text-align:right}
 td.num .bs{display:inline-block;text-align:left;white-space:nowrap}
 .c0,.c1{position:sticky;z-index:1}
 th.c0,th.c1{z-index:3}
-.c0{left:0;min-width:var(--name-w);max-width:var(--name-w);overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--link)}
+.c0{left:0;min-width:calc(var(--name-w) + var(--ct-w));max-width:calc(var(--name-w) + var(--ct-w));overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--link)}
 tr.sel .c0{color:var(--hl)}
-.c1{left:var(--name-w);min-width:160px;max-width:160px;overflow:hidden;text-overflow:ellipsis;border-right:1px solid var(--line2)}
+.c1{left:calc(var(--name-w) + var(--ct-w));min-width:160px;max-width:160px;overflow:hidden;text-overflow:ellipsis;border-right:1px solid var(--line2)}
 th.c0{color:var(--fg)}
 .pubc{min-width:var(--name-w);max-width:var(--name-w);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .b{display:inline-block;box-sizing:content-box;width:13px;text-align:center;margin-left:3px;padding:0 3px;border:1px solid var(--line2);border-radius:999px;background:var(--badge);color:var(--badgefg);font-size:10px;font-weight:600;line-height:14px;vertical-align:middle}
@@ -1180,6 +1246,14 @@ th.c0{color:var(--fg)}
 .na{color:var(--mut);opacity:.7}
 .legend .mk-d{color:var(--mut)}td.dit{color:var(--mut)}td.dit span.dit{opacity:.9;font-size:14px;font-style:normal}
 .empty{color:var(--mut)}
+/* 配属先セルの先頭は、開閉の状態の表示（.ct。セル全体のクリックで開閉）か同じ幅の空き（.ct0）。社名の開始位置をすべての行でそろえる（「+99」まで収まる固定幅） */
+.ct,.ct0{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:calc(var(--ct-w) - 6px);height:18px;margin-right:6px;padding:0;vertical-align:middle}
+td.c0[rowspan]:not([rowspan="1"]){vertical-align:top}
+.ct{border:1px solid var(--line2);border-radius:5px;background:var(--surface);color:var(--fg);font:inherit;font-size:10px;line-height:1}
+td.gtog{cursor:pointer}
+td.gtog:hover{background:color-mix(in srgb,var(--link) 9%,var(--surface))}
+td.gtog:hover .ct,td.gtog:focus-visible .ct{border-color:var(--link);color:var(--link)}
+td.gtog:focus-visible{outline:2px solid var(--link);outline-offset:-2px}
 @media (max-width:1180px){.layout{grid-template-columns:minmax(0,1fr) 340px}}
 @media (max-width:800px){
  #pop{left:0!important;right:0;bottom:0;top:auto!important;width:auto;max-width:none;border-radius:14px 14px 0 0;max-height:60vh}
@@ -1202,11 +1276,12 @@ __LOCK_HTML__
 <input id="q" type="search" placeholder="すべての列から検索"></div>
 </header>
 <p class="notice"><b>注意</b>　調査は AI（GPT-6 luna）が自動で行ったもので、誤りを含むことがあります。大事な値は出典で確かめてください。出典には再配布できない情報が含まれるため、合言葉は他人に教えたり公開したりしないでください。</p>
-<details class="legend"><summary><span>値の右の印</span><span><span class="mk mk-p">30.7</span> 前年度の枠から採用</span><span><span class="mk mk-u">30.7</span> 非公式情報</span><span><span class="mk mk-m">30.7</span> 同順位に別の値あり</span><span><span class="mk-d">〃</span> 左の学位と同額</span><span class="more">使い方</span></summary>
+<details class="legend"><summary><span>値の右の印</span><span><span class="mk mk-p">30.7</span> 前年度の枠から採用</span><span><span class="mk mk-u">30.7</span> 非公式情報</span><span><span class="mk mk-m">30.7</span> 同順位に別の値あり</span><span><span class="mk-d">〃</span> 左の学位と同額</span><span><span class="mk-d">≠</span> 会社行で枠ごとに値が異なる</span><span class="more">使い方</span></summary>
 <div class="help">表の値の装飾：前＝青い字、非＝橙の点線の下線、+＝値の右上の小さな点（複数重なることもある。セルのツールチップに言葉で表示。ポップアップ・右パネルは従来どおり「前」「非」「+」のバッジ）。前：当年度の枠に値がなく、同名の前年度の枠から採用（応募枠名に付く場合は前年度のみの枠）。非：非公式情報（出典区分が不明なものを含む）。+：同順位に異なる値が複数あり先頭を表示。<br>
-優先順位：今年度公式 &gt; 前年度公式 &gt; 今年度非公式 &gt; 前年度非公式 &gt; 今年度不明 &gt; 前年度不明（企業情報は公式 &gt; 非公式 &gt; 不明）。「—」は情報なし。「〃」は左の学位（値のある直近のもの）と同額・同じ印で、クリックすると根拠を表示、並べ替えでは値として扱います。列見出しをクリックすると並べ替え（昇順 ▲ → 降順 ▼ → 解除）、重ねると説明を表示（スマホは長押し）、セルをクリックすると値の根拠を表示します。ツールバーの「前年度の日程を+1年」は表と右パネルの前年度の日付だけを1年後ろへずらします（「前年度」オン時のみ表示）。初任給の要約列は見出しの学位ボタンをクリックするたびに学士→修士→博士→最大→学士と切り替わります（右パネルの要約も同じ値）。見出しの ▸ ◂ ▾ で、選択した学位（または最大）の1列 ⇄ 学位別3列 ⇄ 内訳（基本給・固定残業代・その他。展開中はその学位の月給列を隠す）に切り替えられます。選考は見出しの ▸ ◂ で、まれな選考の記号だけ ⇄ 全10種の○×列に切り替えられます。</div>
+優先順位：今年度公式 &gt; 前年度公式 &gt; 今年度非公式 &gt; 前年度非公式 &gt; 今年度不明 &gt; 前年度不明（企業情報は公式 &gt; 非公式 &gt; 不明）。「—」は情報なし。「〃」は左の学位（値のある直近のもの）と同額・同じ印で、クリックすると根拠を表示、並べ替えでは値として扱います。列見出しをクリックすると並べ替え（昇順 ▲ → 降順 ▼ → 解除）、重ねると説明を表示（スマホは長押し）、セルをクリックすると値の根拠を表示します。ツールバーの「前年度の日程を+1年」は表と右パネルの前年度の日付だけを1年後ろへずらします（「前年度」オン時のみ表示）。初任給の要約列は見出しの学位ボタンをクリックするたびに学士→修士→博士→最大→学士と切り替わります（右パネルの要約も同じ値）。見出しの ▸ ◂ ▾ で、選択した学位（または最大）の1列 ⇄ 学位別3列 ⇄ 内訳（基本給・固定残業代・その他。展開中はその学位の月給列を隠す）に切り替えられます。選考は見出しの ▸ ◂ で、まれな選考の記号だけ ⇄ 全10種の○×列に切り替えられます。<br>
+配属先のセルをクリックすると、その配属先の枠を会社行1行から各行に展開（セルの「+N」はNの行数）し、展開中は同じ配属先のセルを1つに結合して、そのセル（「−」）のクリックで収納します（既定は収納。並べ替えでは、収納中の会社行は1行として自分の値で並び、展開中の行は1行ずつ独立して並びます。並べ替えで上下に隣り合った同じ配属先のセルだけが結合され、離れたセルはそれぞれ「−」で収納できます。「≠」は「—」と同じ値なしとして、昇順でも降順でも末尾に並びます。配属先の見出しの「すべて展開／すべて収納」で一括。開閉は保存されます）。会社行の値は、枠の値がすべて同じならその値、1つでも違えば ≠ で、クリックすると枠ごとの値と根拠を表示します。名前の列（応募枠・採用元）は、違うときは名前を連結して表示します。</div>
 </details>
-<div class="layout"><div class="wrap"><table><thead id="hd"></thead><tbody id="tb"></tbody></table></div>
+<div class="layout"><div class="wrap"><table><thead id="hd"></thead><tbody id="tb"></tbody></table><div id="hv" hidden></div></div>
 <aside id="panel"></aside></div>
 </div>
 <div id="pop" hidden role="dialog"></div>
@@ -1220,7 +1295,7 @@ const rowCache=new Map();let selTr=null;
 function selectRow(tr){
  if(selTr)selTr.removeAttribute('class');if(selTd)selTd.classList.remove('selc');
  selTr=tr;selTd=tr&&selCol>=0?tr.cells[selCol]:null;
- if(selTr)selTr.className='sel';if(selTd)selTd.classList.add('selc')}
+ if(selTr)selTr.className='sel';if(selTd)selTd.classList.add('selc');showHover(hoverTr)}
 const hd=document.getElementById('hd'),tb=document.getElementById('tb'),info=document.getElementById('info'),pop=document.getElementById('pop');
 const narrow=()=>matchMedia('(max-width:800px)').matches;
 function el(t,txt,cls){const e=document.createElement(t);if(txt!==undefined)e.textContent=txt;if(cls)e.className=cls;return e}
@@ -1276,6 +1351,7 @@ function buildHeader(){
     if(x.r==='imax')th.append(tg('▸','業種を1位〜3位の3列に展開',()=>{fold.i=true}));
     if(x.r==='max'){const controls=el('div',undefined,'salary-controls');controls.append(degreeButton(),tg('▸','学位別の3列に展開',()=>{fold.e=true}));th.append(controls)}
     if(x.r==='deg'&&!fold.d[x.k])th.append(tg('▸','内訳の列（基本給・固定残業代・その他）を表示',()=>{fold.d[x.k]=true}));
+    if(D.columns[i]==='配属先')th.append(allToggle());
     headerEvents(th,i);rows[L].append(th);j++;continue}
    const key=x.path.slice(0,L+1).join('/');let n=1;
    while(j+n<info.length&&info[j+n].path.length>L&&info[j+n].path.slice(0,L+1).join('/')===key)n++;
@@ -1293,7 +1369,7 @@ try{const s=JSON.parse(localStorage.getItem(VK));if(s){for(const k of ['previous
 const shx=document.getElementById('shift'),prx=document.getElementById('previous'),unx=document.getElementById('unofficial');
 const original={rows:D.rows,groups:D.groups,companies:D.companies};
 function displayRows(){
- rowCache.clear();
+ rowCache.clear();companyRows=new Map();
  const idx=selected?D.rows.indexOf(selected):-1,mode=Number(view.previous)+''+Number(view.unofficial),v=(D.variants||{})[mode]||{};
  D.rows=original.rows.map((r,i)=>Object.assign([...r],(v.rows||{})[i]||{}));
  D.groups=original.groups.map((g,i)=>Object.assign({},g,(v.groups||{})[i]||{}));
@@ -1308,39 +1384,45 @@ const sv=c=>shiftOn&&c[5]?c[5]:null; // ずらした [表示文字列, ソート
 const txt=c=>(sv(c)||c)[0];
 function vnode(c){const s=sv(c);if(!s)return document.createTextNode(c[0]);const e=el('span',s[0],'sh');e.title=SHT;return e}
 const text=r=>r.slice(0,NC).map(c=>txt(c)+' '+c[2]+' '+(c[3]||'')).join(' ').toLowerCase();
-function key(c,i){if(c[0]==='—')return null;const s=sv(c)?sv(c)[1]:c[1];
+function key(c,i){if(c[0]==='—'||c[0]==='≠')return null; // 「≠」は「—」と同じ値なし（並べ替えでは昇順でも降順でも末尾）
+ const s=sv(c)?sv(c)[1]:c[1];
  if(numeric.has(D.columns[i])){const n=typeof s==='number'?s:parseFloat(String(c[0]).replace(/,/g,''));return isNaN(n)?String(c[0]):n}
  if(typeof s==='number')return s;return String(s??c[0])}
 function cmp(a,b){if(a===null&&b===null)return 0;if(a===null)return 1;if(b===null)return -1;
  if(typeof a==='number'&&typeof b==='number')return a-b;return String(a).localeCompare(String(b),'ja',{numeric:true})}
 // --- 〃（規約は SALARY_KEYS の注釈）。表示だけの処理で、値・並べ替え・絞り込み・根拠ポップアップは元のセルのまま ---
-function dittoSrc(r,i){const [ro,k]=D.fold[i];if((ro!=='deg'&&ro!=='sub')||k<1||r[i][0]==='—')return -1;
+function dittoSrc(r,i){const [ro,k]=D.fold[i];if((ro!=='deg'&&ro!=='sub')||k<1||r[i][0]==='—'||r[i][0]==='≠')return -1;
  const nm=D.columns[i].slice(2),c=r[i];
  for(let j=k-1;j>=0;j--){const jc=CI(DEGREE_NAMES[j]+nm);if(jc<0||!shown(jc)||r[jc][0]==='—')continue;
   const p=r[jc];return p[0]===c[0]&&(p[2]||'')===(c[2]||'')&&(p[3]||'')===(c[3]||'')&&(p[4]||'')===(c[4]||'')?jc:-1}
  return -1}
 function render(){
- closePop();applyFold();
- const available=D.rows.filter(r=>view.previous||!r[NC].slot.prev);
+ closePop();
+ const available=D.rows.filter(r=>view.previous||(r[NC].slots||[r[NC].slot]).some(s=>!s.prev));
  let rows=available.filter(r=>r.hay.includes(query));
+ const matched=rows.length;rows=groupRows(rows); // 絞り込み → まとめる → 並べ替え（表に出ている行そのもの）→ 隣接セルの結合（applySpans）
  if(sortCol>=0){const k=rows.map(r=>[r,key(r[sortCol],sortCol)]);
   k.sort((x,y)=>{if(x[1]===null||y[1]===null)return cmp(x[1],y[1]);return sortDir*cmp(x[1],y[1])});rows=k.map(x=>x[0])}
- if(selected&&!rows.includes(selected))selected=null;
+ markRows(rows);applyFold(); // 見出しの全開閉ボタンが会社の開閉状態を見るので、見出しはまとめたあとに作る
+ if(selected&&!rows.includes(selected))selected=homeOf.get(selected)||null;
  if(!narrow()&&rows.length&&!selected)selected=rows[0];
  const f=document.createDocumentFragment();
  rows.forEach(r=>{let tr=rowCache.get(r);if(!tr){tr=buildRow(r);rowCache.set(r,tr)}f.appendChild(tr)});
+ applySpans(rows);
  tb.replaceChildren(f);selectRow(selected?rowCache.get(selected):null);
  renderPanel();
- info.textContent=`${rows.length} / ${available.length} 行　生成: ${D.built_at}${D.skipped?`　（旧形式等で ${D.skipped} 件を除外）`:''}`;
+ info.textContent=`${matched} / ${available.length} 行${rows.length===matched?'':`（表示 ${rows.length} 行）`}　生成: ${D.built_at}${D.skipped?`　（旧形式等で ${D.skipped} 件を除外）`:''}`;
 }
 function buildRow(r){
- const tr=document.createElement('tr');
- tr.onclick=e=>{const td=e.target.closest('td');closePop();selected=r;selCol=td?td.cellIndex:-1;selectRow(tr);renderPanel();
+ const tr=document.createElement('tr');tr.glyph=glyphOf.get(r)||''; // 配属先セルの開閉の記号（空なら開閉できない行）。変わったら groupRows がノードを捨てる
+ tr.onclick=e=>{const td=e.target.closest('td');closePop();
+  if(td&&td.cellIndex===0&&tr.glyph){toggleGroup(r);return} // 開閉できる配属先セル（結合したセルは、どの高さをクリックしても先頭の行のこのセル）
+  selected=r;selCol=td?td.cellIndex:-1;selectRow(tr);renderPanel();
    document.getElementById('panel').scrollTop=0;
    if(selTd&&cellDetail(r,selCol))openPop(selTd,cellPop(r,selCol));
    else if(narrow())document.getElementById('panel').scrollIntoView({behavior:'smooth',block:'start'})};
   r.slice(0,NC).forEach((c,i)=>{const td=document.createElement('td');
-   td.className='c'+i+(startCols.has(i)?' gs':'')+(D.columns[i]==='採用元'?' pubc':'')+(numeric.has(D.columns[i])?' num':'')+(c[0]==='—'?' na':'')+((c[2]||'').includes('前')?' pv':'');
+   td.className='c'+i+(startCols.has(i)?' gs':'')+(D.columns[i]==='採用元'?' pubc':'')+(numeric.has(D.columns[i])?' num':'')+(c[0]==='—'||c[0]===NE?' na':'')+(i===0&&tr.glyph?' gtog':'')+((c[2]||'').includes('前')?' pv':'');
    const dj=dittoSrc(r,i);
    if(dj>=0){td.classList.remove('pv');td.classList.add('dit');td.append(el('span','〃','dit'));
     const words=[...(c[2]||'')].map(m=>MK[m][1]).join('・');
@@ -1349,10 +1431,101 @@ function buildRow(r){
    const mk=c[2]||'',vn=vnode(c);
    if(mk){const w=el('span',undefined,['mk',...[...mk].map(m=>MK[m][0])].join(' '));w.append(vn);td.append(w)}else td.append(vn);
    const words=[...mk].map(m=>MK[m][1]).join('・'),base=(i<2||c[3])?(c[3]||txt(c)):'';
-   if(base||words)td.title=[base,words].filter(Boolean).join('\n');tr.appendChild(td)});
+   const hint=i===0?groupSlot(td,r,tr.glyph):'';
+   if(base||words||hint)td.title=[hint,base,words].filter(Boolean).join('\n');tr.appendChild(td)});
  return tr;
 }
-function cellDetail(r,i){const d=r[NC];if(i===1)return d.slot;
+// --- 会社ごとの収納・展開 ---------------------------------------------------
+// 同じ配属先（d.p）の、条件に合うメンバー行が2行以上ある配属先は、既存の行と同じ形の「会社行」1行に収納できる（既定は収納）。
+// 収納中は会社行の配属先セルのクリックで展開（セルに「+N」。N=メンバー行数）し、展開中は会社行を出さず、隣り合う同じ配属先のセルを結合して、どのセル（「−」）のクリックでも配属先全体を収納する。
+// 会社行のセルは、メンバーの表示がすべて同じならその値、1つでも違えば ≠（名前の列は名前を連結）。ポップアップは各メンバーの既存ブロックを並べて作る。
+const NE='≠',OPEN='−',OK='viewerAssignOpen';let opened=new Set(),companyRows=new Map(),groupKeys=[],homeOf=new Map(),glyphOf=new Map(),openRows=new Set();
+try{const s=JSON.parse(localStorage.getItem(OK));if(Array.isArray(s))opened=new Set(s.filter(x=>typeof x==='string'))}catch(e){}
+function setOpen(f){f();try{localStorage.setItem(OK,JSON.stringify([...opened]))}catch(e){}render()}
+const uniq=xs=>[...new Map(xs.map(x=>[JSON.stringify(x),x])).values()];
+// 名前の列の連結（応募枠・採用元・配属先）。統合行と同じ規則（build_viewer.py の name_list_cell。区切り・上限・文言は D.name_list、単位だけ列ごと）
+function nameList(items,unit,sort,marks=''){ // items: [[表示名, 正式名]]
+ const L=D.name_list,sh=items.map(x=>x[0]);
+ return [sh.length<=L.limit?sh.join(L.sep):L.more.replace('{first}',()=>sh[0]).replace('{n}',()=>sh.length-1).replace('{unit}',()=>unit),sort,marks,
+  items.map(([s,f])=>s===f?f:s+'（'+f+'）').join('\n')]}
+// 同じ列のメンバーのセル。表示（文字・前置・全文・ずらし）がすべて同じならその値（印は和集合）、違えば onDiff（既定は ≠ と、全文欄に値の一覧）
+function sameCell(cs,onDiff){
+ const f=cs[0],same=cs.every(c=>txt(c)===txt(f)&&(c[3]||'')===(f[3]||'')&&(c[4]||'')===(f[4]||'')&&!sv(c)===!sv(f));
+ if(same){const c=[...f];c[2]=[...'前非+'].filter(m=>cs.some(x=>(x[2]||'').includes(m))).join('');return c}
+ if(onDiff)return onDiff(cs);
+ const show=c=>(c[4]?c[4]+' ':'')+txt(c)+(c[3]&&c[3]!==txt(c)?'（'+c[3]+'）':'');
+ return [NE,null,'',[...new Set(cs.map(show))].join('／')]}
+// 応募枠セル。同名の枠は1つにして連結する
+function slotCell(slots,sort){
+ const vis=visSlots(slots),use=[...new Map((vis.length?vis:slots).map(s=>[s.name,s])).values()];
+ return nameList(use.map(s=>[s.cell[0],s.name]),'枠',sort,use.every(s=>s.prev)?'前':'')}
+// 名前の列（配属先・採用元）で値が違うとき：同じ正式名は1つにして、連結する
+const namesCell=cs=>nameList([...new Map(cs.map(c=>[c[3]||c[0],[c[0],c[3]||c[0]]])).values()],'社',cs[0][1]);
+function companyRow(ms){
+ const ds=ms.map(m=>m[NC]),slots=ms.flatMap(m=>m[NC].slots||[{...m[NC].slot,cell:m[1]}]),procs=uniq(ds.map(x=>x.process)),
+  cells=ms[0].slice(0,NC).map((_,i)=>i===1?slotCell(slots,ms[0][1][1]):sameCell(ms.map(m=>m[i]),i===0||i===NC-1?namesCell:undefined)),
+  title=ms[0][0][3]||ms[0][0][0],pubs=[...new Set(ms.map(m=>m[NC-1][3]||m[NC-1][0]))].filter(x=>x!==title);
+ return [...cells,{p:ds[0].p,members:ms,slots,title:[title,...new Set(visSlots(slots).map(s=>s.name))],...(pubs.length?{pub:pubs.join('、')}:{}),
+  process:procs.length===1?procs[0]:null,mixed:procs.length>1,process_notes:uniq(ds.flatMap(x=>x.process_notes||[])),
+  windows:uniq(ds.flatMap(x=>x.windows||[])),wmarks:uniq(ds.map(x=>x.wmarks||'')).length===1?(ds[0].wmarks||''):''}]}
+// 絞り込み後の行（元の順）を、配属先ごとにまとめる。収納中は会社行1行、展開中はメンバー行（openRows）。まとまりの位置は最初のメンバーの位置、メンバーは元の順。
+// 並べ替えはこのあとで、出てきた行（会社行・メンバー行）そのものを並べる。会社行はメンバーが同じなら同じ行オブジェクトを返す（行キャッシュを生かす）。使わなくなった会社行のノードは捨てる。
+function groupRows(rows){
+ const by=new Map(),live=new Map(),out=[];groupKeys=[];homeOf=new Map();glyphOf=new Map();openRows=new Set();
+ rows.forEach(r=>{const k=r[NC].p;if(!by.has(k))by.set(k,[]);by.get(k).push(r)});
+ by.forEach((ms,k)=>{
+  if(ms.length<2){out.push(...ms);return}
+  let cr=companyRows.get(k);
+  if(!cr||cr[NC].members.length!==ms.length||cr[NC].members.some((m,j)=>m!==ms[j]))cr=companyRow(ms);
+  live.set(k,cr);groupKeys.push(k);
+  if(opened.has(k)){ms.forEach(m=>openRows.add(m));out.push(...ms)}
+  else{glyphOf.set(cr,'+'+ms.length);ms.forEach(m=>homeOf.set(m,cr));out.push(cr)}});
+ companyRows.forEach((cr,k)=>{if(live.get(k)!==cr)rowCache.delete(cr)});
+ companyRows=live;return out}
+// 並べ替え後の表で、展開中の配属先の行が上下に隣り合うまとまりごとに、先頭の行（結合した配属先セルの持ち主）に開閉の記号「−」を付ける。
+// 会社行を選んだまま展開したときの選択先（homeOf）は、並べ替え後の表で最初に出るメンバー行。記号が変わった行のノードはキャッシュから捨てる。
+function markRows(rows){
+ rows.forEach((r,i)=>{if(!openRows.has(r))return;const p=r[NC].p;
+  if(i===0||rows[i-1][NC].p!==p)glyphOf.set(r,OPEN);
+  const cr=companyRows.get(p);if(!homeOf.has(cr))homeOf.set(cr,r)});
+ rows.forEach(r=>{const tr=rowCache.get(r);if(tr&&tr.glyph!==(glyphOf.get(r)||''))rowCache.delete(r)})}
+// 配属先セルの先頭の場所。開閉できる行（収納中の会社行・展開中の先頭のメンバー行）には状態の表示（+N／−）を置き、セル全体のクリック・Enter・Space で開閉する。
+// 開閉できない行には同じ幅の空きを置く（社名の位置をそろえる）。戻り値はセルの title に添える説明。
+function groupSlot(td,r,g){
+ if(!g){td.prepend(el('span',undefined,'ct0'));return ''}
+ const open=g===OPEN;td.prepend(el('span',g,'ct'));td.tabIndex=0;td.setAttribute('aria-expanded',String(open));
+ td.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleGroup(r)}};
+ return open?'この配属先の枠を会社行に収納':'この配属先の'+r[NC].members.length+'行を展開'}
+// 開閉と同時にその行を選ぶ。収納中の会社行を選べば展開で最初に出るメンバー行へ、結合したセル（のまとまりの先頭の行）を選べば収納で会社行へ移る（homeOf）。
+function toggleGroup(r){const k=r[NC].p;selected=r;selCol=-1;setOpen(()=>{opened.has(k)?opened.delete(k):opened.add(k)});
+ document.getElementById('panel').scrollTop=0}
+// 配属先の見出しの全開閉ボタン（表示中の配属先が対象）
+function allToggle(){const all=groupKeys.length>0&&groupKeys.every(k=>opened.has(k));
+ const b=tg(all?'すべて収納':'すべて展開',all?'表示中の配属先をすべて会社行に収納':'表示中の配属先をすべて展開'); // 見た目と見出しへの伝播止めは折りたたみの ▸ と同じ。押したときの処理だけ置き換える
+ b.onclick=e=>{e.stopPropagation();setOpen(()=>{groupKeys.forEach(k=>all?opened.delete(k):opened.add(k))})};
+ b.setAttribute('aria-expanded',String(all));b.disabled=!groupKeys.length;return b}
+// 展開中の配属先はメンバー行が続くので、配属先セルを1つに結合する（先頭の行のセルが rowSpan で下へ伸び、残りの行のセルは隠す。セルの数・列番号は変えない）。
+// 隣の行は並べ替え・絞り込みで変わるので、描画のたびに表示中の行の隣を見て全部付け直す（キャッシュしたノードに古い結合を残さない）。会社行と1行だけの配属先は1行1セル。
+function applySpans(rows){
+ for(let i=0;i<rows.length;){
+  const d=rows[i][NC];let n=1;
+  if(!d.members)while(i+n<rows.length&&!rows[i+n][NC].members&&rows[i+n][NC].p===d.p)n++;
+  for(let j=0;j<n;j++){const td=rowCache.get(rows[i+j]).cells[0],span=j?1:n,hide=j>0;
+   if(td.rowSpan!==span)td.rowSpan=span;if(td.hidden!==hide)td.hidden=hide}
+  i+=n}}
+// 会社行のポップアップ。メンバーごとの既存ブロックを、中身が同じものは1つにまとめ、見出しに該当する枠を並べる。
+function companyBlocks(r,i){
+ const g=new Map();
+ r[NC].members.forEach(m=>{const slots=slotsOf(m).map(s=>s.name+(s.year?'（'+slotYear(s,s.year)+'）':''));
+  metricBlocks(m,i).forEach(b=>{const {heading,collapsed,...body}=b,k=JSON.stringify(body);
+   if(!g.has(k))g.set(k,{b,slots:[],closed:true});
+   const e=g.get(k);e.slots.push(...slots);e.closed=e.closed&&!!collapsed})});
+ return [...g.values()].map(e=>({...e.b,collapsed:e.closed,
+  heading:(e.b.heading?e.b.name+'：'+e.b.shown+'　':'')+'応募枠：'+[...new Set(e.slots)].join('、')})).sort((a,b)=>a.collapsed-b.collapsed)}
+// --- 会社ごとの収納・展開ここまで ---
+function cellDetail(r,i){const d=r[NC];
+ if(d.members&&i!==1){const ds=d.members.map(m=>cellDetail(m,i)).filter(Boolean);return ds.length?ds:null} // 会社行：メンバーのどれかに根拠があれば開く
+ if(i===1)return d.slots||d.slot;
  if(D.columns[i]==='初任給'&&view.degree!=='最大')i=CI(view.degree+'初任給');
  if(D.fold[i][0]==='ssub'){ // 選考の各列は「選考」列の候補・注記から、その選考の分だけ取り出す（別データは持たない）
   const all=(D.groups[d.g]||{})[CI('選考')];if(!all)return null;const l=D.columns[i];
@@ -1397,6 +1570,8 @@ function headerPop(i){return p=>columnPop(p,D.full[i],D.desc[i].short,D.desc[i].
 const SOURCE_WORDS={'公':'公式','非':'非公式','?':'不明'},SELECTION_WORDS={'工程':'選考工程','ES':'ES提出','Web':'Webテスト','筆記':'筆記試験','課題':'記述課題','GD':'グループディスカッション','集団面接':'集団面接','ケース':'ケース面接','面接':'面接','研究発表':'研究発表','コーディング':'コーディング課題'};
 const contextOf=r=>r[0][0]+' ・ '+r[1][0];
 const gradYear=y=>String(y).slice(-2)+'卒';
+const slotYear=(s,y)=>gradYear(y)+(y===s.ry-1?'・前年度':'');
+const visSlots=ss=>ss.filter(s=>view.previous!==false||!s.prev),slotsOf=r=>visSlots(r[NC].slots||[r[NC].slot]);
 function targetOf(r,y){const ry=r[NC].slot.ry;return y===1?gradYear(ry):y===2?gradYear(ry-1)+'・前年度':''}
 function sourceLink(raw){const u=raw&&safeUrl(raw);if(!u)return el('span',raw||'記載なし');
  const a=el('a',u.hostname.replace(/^www\./,''));a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.title=u.href;return a}
@@ -1404,9 +1579,12 @@ function money(v){return v===null||v===undefined?'記載なし':(v/10000).toFixe
 // DOM描画はこの関数だけ。セル・選考・応募枠・右パネルは同じブロックモデルを渡す。
 function renderMetricBlock(p,b){
  const block=el(b.collapsed?'details':'section',undefined,'metric-block');
- if(b.collapsed)block.append(el('summary',b.name+'：'+b.shown));
- else if(b.heading)block.append(el('h3',b.name+'：'+b.shown));
- p.append(block);const line=el('div','表示中：'+b.shown,'displayed');line.append(el('span',b.target,'target'));block.append(line);
+ const caption=typeof b.heading==='string'?b.heading:b.name+'：'+b.shown+(b.merged&&b.target?'（'+b.target+'）':''); // 会社行のブロックは見出しの文面ごと渡される
+ if(b.collapsed)block.append(el('summary',caption));
+ else if(b.heading)block.append(el('h3',caption));
+ p.append(block);
+ // 統合行の枠は見出しが枠名を示し、セルは連結名なので「表示中」を出さない
+ if(!b.merged){const line=el('div','表示中：'+b.shown,'displayed');line.append(el('span',b.target,'target'));block.append(line)}
  if(b.extra)block.append(el('div',b.extra,'record-extra'));
  const table=el('table',undefined,'record-table'),thead=el('thead'),head=el('tr');
  ['値','対象','種類','出典'].forEach(t=>head.append(el('th',t)));thead.append(head);table.append(thead);let body=el('tbody');table.append(body);block.append(table);
@@ -1452,12 +1630,14 @@ function metricBlockData(r,i,cd,name=D.columns[i]){
  return {name,shown,target:chosen?targetOf(r,chosen[1]):'',records,notes:cd[1].map(n=>[noteLabel(n[0]),D.notes[n[1]]])}}
 // セル種別の差はデータの組み立てだけ。専用の描画・表・カードは持たない。
 function metricBlocks(r,i){
- if(i===1){const s=r[NC].slot,yearLabel=y=>gradYear(y)+(y===s.ry-1?'・前年度':'');
-  const picked=s.src.findIndex(x=>x[0]===s.year&&(x[2]||{}).source_kind==='official'),chosen=picked>=0?picked:s.src.findIndex(x=>x[0]===s.year);
-  return [{name:'応募枠',shown:r[1][0]||'—（記録なし）',target:s.year?yearLabel(s.year):'',
-   extra:'配属先：'+[s.assign,...s.others].filter(Boolean).join('、'),
-   records:s.src.map((x,j)=>({value:s.name,target:yearLabel(x[0]),kind:({'official':'公式','unofficial':'非公式'}[(x[2]||{}).source_kind]||'不明'),url:x[1],chosen:j===chosen,extra:[]})),
-   notes:s.note?[['応募枠の収録について',s.note]]:[]}]}
+ if(r[NC].members&&i!==1)return companyBlocks(r,i);
+ if(i===1){const slots=slotsOf(r);
+  return slots.map(s=>{const yearLabel=y=>slotYear(s,y);
+   const picked=s.src.findIndex(x=>x[0]===s.year&&(x[2]||{}).source_kind==='official'),chosen=picked>=0?picked:s.src.findIndex(x=>x[0]===s.year);
+   return {name:'応募枠',shown:r[NC].slots?s.name:r[1][0]||'—（記録なし）',heading:slots.length>1,merged:slots.length>1,target:s.year?yearLabel(s.year):'',
+    extra:'配属先：'+[s.assign,...s.others].filter(Boolean).join('、'),
+    records:s.src.map((x,j)=>({value:s.name,target:yearLabel(x[0]),kind:({'official':'公式','unofficial':'非公式'}[(x[2]||{}).source_kind]||'不明'),url:x[1],chosen:j===chosen,extra:[]})),
+    notes:s.note?[['応募枠の収録について',s.note]]:[]}})}
  if(D.columns[i]==='選考'||D.fold[i][0]==='ssub'){
   const cd=(D.groups[r[NC].g]||{})[CI('選考')]||[[],[]],focus=selectionTypes(r,i),names=['工程',...D.columns.filter((_,j)=>D.fold[j][0]==='ssub')];
   names.sort((a,b)=>Number(focus.includes(b))-Number(focus.includes(a)));
@@ -1492,7 +1672,7 @@ function renderPanel(){
  [['初任給',1],['平均年収'],['月残業'],['年間休日'],['有給取得'],['最初の締切']].forEach(([n,big])=>{const i=CI(n);if(i<0)return;
   const c=r[i],st=el('div',undefined,'stat'+(big?' big':'')),v=el('div',undefined,'v');
   st.append(el('div',n==='初任給'?'初任給（'+(view.degree==='最大'?'学位の最大値':view.degree)+'）':n+(unitOf(i)?'（'+unitOf(i)+'）':''),'l'));
-  v.append(valNode(c));if(big&&c[0]!=='—')v.append(el('span','万円/月','u'));st.append(v);stats.append(st)});
+  v.append(valNode(c));if(big&&c[0]!=='—'&&c[0]!==NE)v.append(el('span','万円/月','u'));st.append(v);stats.append(st)});
  p.append(stats);
  const facts=(names,title)=>{const ul=el('ul',undefined,'facts');
   names.forEach(n=>{const i=CI(n);if(i<0)return;const li=el('li'),v=valNode(r[i]);v.classList.add('v');
@@ -1502,7 +1682,7 @@ function renderPanel(){
   p.append(el('h3',title),ul)};
  facts(['学士初任給','修士初任給','博士初任給'],'初任給（学位別）');
  const h=el('h3','選考工程');badges(h,d.process&&d.process.marks);p.append(h);
- if(!d.process)p.append(el('div','—','na'));
+ if(!d.process)p.append(el('div',d.mixed?'≠　枠ごとに異なります':'—','na'));
  else{const ol=el('ol',undefined,'steps');d.process.stages.forEach(st=>{const li=el('li'),sp=el('span');
   st.forEach((x,i)=>{if(i)sp.append(' ／ ');sp.append(x)});li.append(sp);ol.append(li)});p.append(ol)}
  renderNotes(p,d.process_notes||[]);
@@ -1514,6 +1694,24 @@ function renderPanel(){
  const skip=new Set([...D.columns.filter((_,i)=>D.fold[i][0]==='ssub'||D.fold[i][0]==='isub'),'配属先','採用元','応募枠','最初の募集開始','最初の締切','選考','初任給','平均年収','月残業','年間休日','有給取得']);
  facts(D.columns.filter(n=>!skip.has(n)&&!/^(学士|修士|博士)/.test(n)),'企業情報（配属先）');
 }
+// --- 行のホバー：:hover で行の背景を変えると、ポインターの下を行が通るたびに表を描き直す。半透明の1枚の帯（#hv）を、専用の層で transform だけ動かして表す。選択中の行は従来どおり選択色のまま ---
+const hv=document.getElementById('hv');let hoverTr=null;
+function showHover(tr){hoverTr=tr;
+ if(!tr||!tr.isConnected||tr===selTr){hv.hidden=true;return}
+ const r=tr.getBoundingClientRect(),w=hv.parentNode,wr=w.getBoundingClientRect();
+ hv.style.transform='translateY('+(r.top-wr.top-w.clientTop+w.scrollTop)+'px)';
+ hv.style.height=r.height+'px';hv.style.width=tb.parentNode.getBoundingClientRect().width+'px';hv.hidden=false}
+// 結合した配属先セルは先頭の行のセルなので、その上では持ち主の行ではなく、ポインターの高さにある行に帯を出す（結合した行の中を二分探索）
+function rowAt(e){
+ const td=e.target.closest('td'),tr=td&&td.parentNode;
+ if(!tr||td.rowSpan<2)return tr||null;
+ const rows=tb.rows,i0=tr.sectionRowIndex;let lo=0,hi=td.rowSpan-1;
+ while(lo<hi){const m=(lo+hi+1)>>1;if(rows[i0+m].getBoundingClientRect().top<=e.clientY)lo=m;else hi=m-1}
+ return rows[i0+lo]}
+tb.addEventListener('pointerover',e=>showHover(rowAt(e)));
+tb.addEventListener('pointermove',e=>{const td=e.target.closest('td');if(td&&td.rowSpan>1)showHover(rowAt(e))}); // 結合したセルの中では要素が変わらないので、動くたびに行を見直す
+tb.addEventListener('pointerleave',()=>showHover(null));
+new MutationObserver(()=>showHover(hoverTr)).observe(tb,{childList:true}); // 並べ替え・絞り込みで行の位置が変わったら帯を付け直す
 prx.onchange=()=>setView(()=>{view.previous=prx.checked});
 unx.onchange=()=>setView(()=>{view.unofficial=unx.checked});
 shx.onchange=()=>setView(()=>{view.shift=shx.checked});

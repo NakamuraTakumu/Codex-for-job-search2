@@ -205,14 +205,20 @@ class SelectionProcess(SchemaModel):
         return self
 
 
+_NOT_MAIN_SELECTION = "インターン、インターンシップ、仕事体験、オープンカンパニーなど、新卒本選考でない"
+_FIRST_SUBMISSION = "応募で最初に提出するもの（ES、応募フォームなど。プレエントリーやマイページ登録は含めない）"
+_WINDOW_DATE_UNDATED = "sourceが「随時」「定員に達し次第」など日付を定めない表記の場合は Missing にする。"
 _WINDOW_DATE_RANGE_RULES = (
     "日付は DateRange（earliest, latest。各 YYYY-MM-DD）で記録し、時刻は記録しない。"
+    "日まで分かる場合は earliest と latest を同じ日にする。上旬・初旬は1日〜10日、"
+    "中旬は11日〜20日、下旬は21日〜その月の末日、月だけの記載はその月の1日〜末日とする。"
     "sourceに年の記載がない場合は、そのsourceが対象とする卒業年度や募集時期から年を補う。"
-    "sourceの表記が示す範囲を広げたり狭めたりしない。対応づけ: 日まで特定できる場合は"
-    " earliest と latest を同じ日にする。上旬・初旬は1日〜10日、中旬は11日〜20日、"
-    "下旬は21日〜その月の末日、月だけの記載はその月の1日〜末日とする。"
 )
-_WINDOW_DATE_DO_NOT = "別の募集回や応募枠の日程を流用しない。"
+_WINDOW_DATE_DO_NOT = (
+    "別の募集回や応募枠の日程を流用しない。sourceの表記が示す範囲を広げたり狭めたりしない。"
+    "就活サイト・求人サイトの求人の掲載期間を使わない。"
+    "個人の選考体験記、ブログ、SNSに書かれた日付を使わない。"
+)
 
 
 class DateRange(SchemaModel):
@@ -308,16 +314,16 @@ class ApplicationWindow(SchemaModel):
     )
     application_open_date: SourcedDateMetric = Field(
         description=(
-            f"この募集回の応募開始日。{_WINDOW_DATE_RANGE_RULES}"
-            "随時、定員に達し次第など、開始日を定めない表記は Missing にする。"
+            f"この募集回の応募開始日。{_FIRST_SUBMISSION}の受付が始まる日。"
+            f"{_WINDOW_DATE_UNDATED}{_WINDOW_DATE_RANGE_RULES}"
         ),
         json_schema_extra={"x-do_not": _WINDOW_DATE_DO_NOT},
     )
     application_deadline_date: SourcedDateMetric = Field(
         description=(
-            f"この募集回の応募締切日。{_WINDOW_DATE_RANGE_RULES}"
-            "随時、定員に達し次第など、締切日を定めないことをsourceが示す場合は"
-            " Missing にする。"
+            f"この募集回の応募締切日。{_FIRST_SUBMISSION}の締切日。"
+            "適性検査の受検期限や面接日など、後の工程の日付はnoteに書く。"
+            f"{_WINDOW_DATE_UNDATED}{_WINDOW_DATE_RANGE_RULES}"
         ),
         json_schema_extra={"x-do_not": _WINDOW_DATE_DO_NOT},
     )
@@ -348,13 +354,17 @@ class ApplicationWindow(SchemaModel):
 class ApplicationWindows(SchemaModel):
     records: list[ApplicationWindow] = Field(
         description=(
-            "同じ応募枠内で確認できた募集回の一覧。source上の募集回の順に並べる。"
+            "同じ応募枠内で確認できた新卒本選考の募集回の一覧。source上の募集回の順に並べる。"
+            "インターン参加者限定など、応募できる人が限られる募集回は、その条件をnoteに書く。"
             "開始日と締切日の一方だけを確認できる場合も、その募集回を記録し、"
             "確認できない側だけを Missing にする。"
             "片方または両方の日付が後日案内と明示された募集回も記録し、"
             "該当する日付のannounced_laterにsourceとretrievalを保持する。"
             "募集回自体を確認できない（Missing）場合は空配列にする。"
         ),
+        json_schema_extra={
+            "x-do_not": _NOT_MAIN_SELECTION + "募集や、説明会、プレエントリーの日程を募集回にしない。"
+        },
     )
     note: str | None = Field(default=None, description=NOTE_DESCRIPTION)
 
@@ -471,8 +481,8 @@ class ApplicationSlot(SchemaModel):
     )
     application_windows: ApplicationWindows = Field(
         description=(
-            "同じ応募枠に早期選考、通常選考、複数回締切がある場合も、"
-            "日程を募集回ごとに保持するscope。"
+            "この応募枠の日程を募集回ごとに保持する。早期選考、通常選考、複数回の締切がある場合は、"
+            "それぞれを別の募集回にする。"
         ),
         json_schema_extra={
             "x-do_not": "日程だけが異なる募集回を別のApplicationSlotとして重複作成しない。"
@@ -600,8 +610,7 @@ class RecruitmentCase(SchemaModel):
         ),
         json_schema_extra={
             "x-do_not": (
-                "インターン、インターンシップ、仕事体験、オープンカンパニーなど、"
-                "新卒本選考でない枠を含めない。別の年度の応募枠を対象とするsourceの値を使わない。"
+                _NOT_MAIN_SELECTION + "枠を含めない。別の年度の応募枠を対象とするsourceの値を使わない。"
                 "枠名や詳細を確認できない募集予告からslotを推測で作らない。"
                 "応募が別の募集区分を1つのslotにまとめない。"
             )

@@ -72,6 +72,25 @@ class ApplicationWindowsSchemaTest(unittest.TestCase):
                 self.assertEqual(bool(window.application_open_date.records), open_found)
                 self.assertEqual(bool(window.application_deadline_date.records), deadline_found)
 
+    def test_window_dates_share_one_definition_and_exclusions(self):
+        window = SCHEMA["$defs"]["ApplicationWindow"]["properties"]
+        open_date, deadline = window["application_open_date"], window["application_deadline_date"]
+        # 開始日と締切日は同じ「最初に提出するもの」を基準にし、後の工程の期限は note に回す
+        for field in (open_date, deadline):
+            self.assertIn("応募で最初に提出するもの", field["description"])
+            self.assertIn("プレエントリー", field["description"])
+            self.assertIn("掲載期間", field["x-do_not"])
+            self.assertIn("体験記", field["x-do_not"])
+        self.assertIn("後の工程の日付はnoteに書く", deadline["description"])
+        self.assertEqual(open_date["x-do_not"], deadline["x-do_not"])
+        # 本選考でない募集の除外は、枠と募集回で同じ文言を使う
+        records = SCHEMA["$defs"]["ApplicationWindows"]["properties"]["records"]
+        slots = SCHEMA["properties"]["application_slots"]
+        shared = "インターン、インターンシップ、仕事体験、オープンカンパニーなど、新卒本選考でない"
+        self.assertIn(shared + "募集や、説明会、プレエントリーの日程を募集回にしない。", records["x-do_not"])
+        self.assertIn(shared + "枠を含めない。", slots["x-do_not"])
+        self.assertIn("その条件をnoteに書く", records["description"])
+
 
 if __name__ == "__main__":
     unittest.main()
